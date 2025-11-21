@@ -12,10 +12,17 @@ PyTorchの学習ループを簡潔に記述するためのユーティリティ�
 
 ## インストール
 
-必要なライブラリをインストールしてください：
-
+### 方法1: ファイルをコピーして使う場合
+リポジトリ内の `training_manager.py` をあなたのプロジェクトフォルダにコピーしてください。
+その上で、必要なライブラリをインストールします:
 ```bash
 pip install torch matplotlib tqdm
+```
+
+### 方法2: pipでインストールする場合
+Git経由でライブラリとしてインストールすることも可能です:
+```bash
+pip install git+https://github.com/msqrd6/training_manager.git
 ```
 
 ## 使い方
@@ -24,7 +31,7 @@ pip install torch matplotlib tqdm
 
 ```python
 from torch.utils.data import DataLoader
-from training_manager import TrainingManager
+from trmn import TrainingManager
 
 # データローダーの準備
 train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
