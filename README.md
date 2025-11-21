@@ -45,14 +45,14 @@ tm = TrainingManager(
     log_interval=100,
     valid_every_n_epochs=1,
     valid_dataloader=valid_dataloader,
-    model  # 学習するモデルを渡す
+    training_models=[model]  # 学習するモデルをリストで渡す
 )
 
 # 学習ループ
-for epoch in tm.get_epochs():
-    tm.training_mode()
+for epoch in tm.epochs:
+    tm.train_mode()
     
-    for data in tm.get_dataloader():
+    for data in tm.dataloader:
         # 順伝播
         output = model(data)
         loss = criterion(output, target)
@@ -67,8 +67,7 @@ for epoch in tm.get_epochs():
     
     # バリデーション
     if tm.is_validpoint():
-        tm.eval_mode()
-        for data in tm.get_valid_dataloader():
+        for data in tm.valid_dataloader:
             with torch.no_grad():
                 output = model(data)
                 val_loss = criterion(output, target)
@@ -99,23 +98,23 @@ tm.plot(name='training_curve', output_dir='./results')
 - `valid_every_n_epochs` (int, optional): バリデーション実行間隔
 - `valid_dataloader` (DataLoader, optional): バリデーション用データローダー
 - `n_batches_valid` (int, optional): バリデーションで使用するバッチ数（省略時は全バッチ）
-- `*training_models`: 学習対象のモデル（複数指定可能）
+- `training_models` (list, optional): 学習対象のモデルのリスト（複数指定可能）
 
-#### 主要メソッド
+#### 主要メソッド・プロパティ
 
-##### `training_mode()`
+##### `train_mode()`
 登録された全モデルを学習モードに切り替えます。
 
 ##### `eval_mode()`
 登録された全モデルを評価モードに切り替えます。
 
-##### `get_epochs()`
+##### `epochs` (プロパティ)
 エポック数のイテレータを返します。
 
-##### `get_dataloader()`
+##### `dataloader` (プロパティ)
 学習用データローダーを返します。
 
-##### `get_valid_dataloader()`
+##### `valid_dataloader` (プロパティ)
 バリデーション用データローダー（必要に応じて制限付き）を返します。
 
 ##### `batch_step(loss, **kwargs)`
