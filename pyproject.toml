@@ -3,12 +3,12 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "simple_trainer"       # パッケージ名
-version = "0.1.0"             # バージョン
-description = "My custom training manager for PyTorch"
+name = "trmn"       # パッケージ名
+version = "0.1.01"             # バージョン
+description = "training manager for PyTorch"
 readme = "README.md"
 requires-python = ">=3.8"
-dependencies = [              # ★依存ライブラリをここに書く
+dependencies = [              # 依存ライブラリ
     "torch",
     "tqdm",
     "matplotlib"
