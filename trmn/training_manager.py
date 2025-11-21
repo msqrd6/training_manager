@@ -14,7 +14,7 @@ class TrainingManager():
                  valid_every_n_epochs: int = None,
                  valid_dataloader: DataLoader = None,
                  n_batches_valid: int = None,
-                 *training_models,
+                 training_models: list = None,
                  ):
         
         self.dataloader = dataloader
