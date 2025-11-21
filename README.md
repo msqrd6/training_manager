@@ -150,7 +150,7 @@ python training_manager.py
 
 ## ライセンス
 
-[MIT License](LICENSE)
+[MIT License](LICENSE.md)
 
 ## 貢献
 
