@@ -16,6 +16,7 @@ class TrainingManager():
                  n_batches_valid: int = None,
                  training_models: list = None,
                  ):
+
         
         self.dataloader = dataloader
         try:
@@ -60,27 +61,29 @@ class TrainingManager():
         self.valid_loss = 0.0
         self.val_log = []
 
-    def training_mode(self):
+    @property
+    def valid_dataloader(self):
+        if self._raw_valid_dataloader is None:
+            return []
+
+        return islice(self._raw_valid_dataloader, self.n_batches_valid)
+
+
+    def train_mode(self):
+        if self.training_models is None:
+            return
+        
         for model in self.training_models:
             if hasattr(model, 'train') and callable(model.train):
                 model.train()
 
     def eval_mode(self):
+        if self.training_models is None:
+            return
+        
         for model in self.training_models:
             if hasattr(model, 'eval') and callable(model.eval):
                 model.eval()
-
-    def get_epochs(self):
-        return self.epochs
-    
-    def get_dataloader(self):
-        return self.dataloader
-    
-    def get_valid_dataloader(self):
-        if self._raw_valid_dataloader is None:
-            return []
-
-        return islice(self._raw_valid_dataloader, self.n_batches_valid)
 
 
     def batch_step(self, loss, **kwargs) -> None:
@@ -127,6 +130,7 @@ class TrainingManager():
             avg_loss = 0
         self.val_log.append({'step': self.current_iter, 'loss': avg_loss})
         self.valid_loss = 0
+        self.train_mode()
 
     def is_savepoint(self) -> bool:
         if self.current_epoch > self.num_epochs: return False # 終了後はFalse
@@ -140,8 +144,10 @@ class TrainingManager():
         if self.current_epoch > self.num_epochs: return False
         if self.valid_every_n_epochs is not None: 
             if self.current_epoch == self.num_epochs:
+                self.eval_mode()
                 return True
             if (self.current_epoch) % self.valid_every_n_epochs == 0:
+                self.eval_mode()
                 return True
         return False
 
@@ -210,15 +216,15 @@ def main():
     )
 
     tm.eval_mode()
-    for data in tm.get_valid_dataloader():
+    for data in tm.valid_dataloader:
         val_loss = random.random() * 10
         tm.valid_step(val_loss)
     tm.valid_end()
     
+    tm.train_mode() 
     # --- Training Loop ---
-    for epoch in tm.get_epochs():
-        tm.training_mode() 
-        for data in tm.get_dataloader():
+    for epoch in tm.epochs:
+        for data in tm.dataloader:
             time.sleep(0.01) 
             loss = random.random() * 10
             
@@ -227,8 +233,7 @@ def main():
             tm.batch_step(loss)
 
         if tm.is_validpoint():
-            tm.eval_mode()
-            for data in tm.get_valid_dataloader():
+            for data in tm.valid_dataloader:
                 val_loss = random.random() * 10
                 tm.valid_step(val_loss)
             tm.valid_end() 
