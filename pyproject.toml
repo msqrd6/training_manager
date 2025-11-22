@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trmn"       # パッケージ名
-version = "0.1.01"             # バージョン
+version = "0.1.2"             # バージョン
 description = "training manager for PyTorch"
 readme = "README.md"
 requires-python = ">=3.8"
