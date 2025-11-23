@@ -45,13 +45,12 @@ tm = TrainingManager(
     log_interval=100,
     valid_every_n_epochs=1,
     valid_dataloader=valid_dataloader,
+    n_batches_valid=10,  # バリデーションで使用するバッチ数（省略時は全バッチ）
     training_models=[model]  # 学習するモデルをリストで渡す
 )
 
 # 学習ループ
 for epoch in tm.epochs:
-    tm.train_mode()
-    
     for data in tm.dataloader:
         # 順伝播
         output = model(data)
@@ -67,12 +66,12 @@ for epoch in tm.epochs:
     
     # バリデーション
     if tm.is_validpoint():
+        tm.valid_start()  # 評価モードに切り替え、勾配計算を無効化
         for data in tm.valid_dataloader:
-            with torch.no_grad():
-                output = model(data)
-                val_loss = criterion(output, target)
-                tm.valid_step(val_loss)
-        tm.valid_end()
+            output = model(data)
+            val_loss = criterion(output, target)
+            tm.valid_step(val_loss)
+        tm.valid_end()  # 学習モードに戻し、勾配計算を有効化
     
     # チェックポイント保存
     if tm.is_savepoint():
@@ -128,11 +127,14 @@ tm.plot(name='training_curve', output_dir='./results')
 
 - `**kwargs`: 追加で表示する情報
 
+##### `valid_start()`
+バリデーション開始時に呼び出します。登録された全モデルを評価モードに切り替え、勾配計算を無効化します。
+
 ##### `valid_step(loss)`
 バリデーションの各バッチで呼び出し、損失を記録します。
 
 ##### `valid_end()`
-バリデーション終了時に呼び出し、平均損失を計算してログに記録します。
+バリデーション終了時に呼び出し、平均損失を計算してログに記録します。学習モードに戻し、勾配計算を有効化します。
 
 ##### `is_savepoint()`
 現在のエポックがチェックポイント保存のタイミングかを判定します。
@@ -148,11 +150,13 @@ tm.plot(name='training_curve', output_dir='./results')
 
 ## サンプルコード
 
-リポジトリにはダミーデータを使用したサンプルコード（`main()`関数）が含まれています。実行方法：
+リポジトリには完全な動作例が `example.py` に含まれています。実行方法：
 
 ```bash
-python training_manager.py
+python example.py
 ```
+
+このサンプルでは、ダミーデータを使用して学習ループ、バリデーション、チェックポイント保存、損失プロットの一連の流れを確認できます。
 
 ## ライセンス
 

@@ -1,10 +1,9 @@
 import os
-import time
-import random
+import torch
 import matplotlib.pyplot as plt
 from itertools import islice
 from tqdm import tqdm
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
 class TrainingManager():
     def __init__(self, dataloader: DataLoader,
@@ -60,6 +59,9 @@ class TrainingManager():
             
         self.valid_loss = 0.0
         self.val_log = []
+
+        # set train mode
+        self.train_mode()
 
     @property
     def valid_dataloader(self):
@@ -123,6 +125,10 @@ class TrainingManager():
         loss = loss.item() if hasattr(loss, 'item') else loss
         self.valid_loss += loss
 
+    def valid_start(self):
+        self.eval_mode()
+        torch.set_grad_enabled(False)
+
     def valid_end(self):
         if self.n_batches_valid > 0:
             avg_loss = self.valid_loss / self.n_batches_valid
@@ -130,6 +136,7 @@ class TrainingManager():
             avg_loss = 0
         self.val_log.append({'step': self.current_iter, 'loss': avg_loss})
         self.valid_loss = 0
+        torch.set_grad_enabled(True)
         self.train_mode()
 
     def is_savepoint(self) -> bool:
@@ -144,10 +151,8 @@ class TrainingManager():
         if self.current_epoch > self.num_epochs: return False
         if self.valid_every_n_epochs is not None: 
             if self.current_epoch == self.num_epochs:
-                self.eval_mode()
                 return True
             if (self.current_epoch) % self.valid_every_n_epochs == 0:
-                self.eval_mode()
                 return True
         return False
 
@@ -181,70 +186,4 @@ class TrainingManager():
             plt.savefig(output_path)
             plt.close()
 
-class MyDataset(Dataset):
-    def __init__(self, repeat):
-        self.dataset = [i for i in range(10)]
-        self.repeat = repeat
 
-    def __len__(self):
-        return len(self.dataset) * self.repeat
-    
-    def __getitem__(self, idx):
-        true_idx = idx % len(self.dataset)
-        return self.dataset[true_idx]
-
-def main():
-    num_epochs = 5
-    save_every_n_epochs = 2
-    
-    batch_size = 2
-    repeat = 5
-    
-    dataset = MyDataset(repeat=repeat)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    
-    valid_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-
-    tm = TrainingManager(
-        dataloader,
-        num_epochs,
-        save_every_n_epochs,
-        log_interval=5,
-        valid_every_n_epochs=1,
-        valid_dataloader=valid_dataloader,
-        n_batches_valid=3 
-    )
-
-    tm.eval_mode()
-    for data in tm.valid_dataloader:
-        val_loss = random.random() * 10
-        tm.valid_step(val_loss)
-    tm.valid_end()
-    
-    tm.train_mode() 
-    # --- Training Loop ---
-    for epoch in tm.epochs:
-        for data in tm.dataloader:
-            time.sleep(0.01) 
-            loss = random.random() * 10
-            
-            # ここに実際の model(data) や optimizer.step() が入る
-            
-            tm.batch_step(loss)
-
-        if tm.is_validpoint():
-            for data in tm.valid_dataloader:
-                val_loss = random.random() * 10
-                tm.valid_step(val_loss)
-            tm.valid_end() 
-
-        if tm.is_savepoint():
-            pass
-        
-        tm.plot(tm.current_epoch)
-        tm.epoch_step()
-
-    
-
-if __name__ == "__main__":
-    main()
