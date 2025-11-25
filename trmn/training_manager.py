@@ -1,21 +1,23 @@
 import os
 import torch
+import torch.nn as nn
 import matplotlib.pyplot as plt
 from itertools import islice
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 
 class TrainingManager():
-    def __init__(self, dataloader: DataLoader,
+    def __init__(self, 
+                 training_models: list[nn.Module],
+                 dataloader: DataLoader,
                  num_epochs: int,
                  save_every_n_epochs: int = None,
                  log_interval: int = None,
-                 valid_every_n_epochs: int = None,
                  valid_dataloader: DataLoader = None,
+                 valid_every_n_epochs: int = None,
                  n_batches_valid: int = None,
-                 training_models: list = None,
                  ):
-
+        
         
         self.dataloader = dataloader
         try:
@@ -72,17 +74,11 @@ class TrainingManager():
 
 
     def train_mode(self):
-        if self.training_models is None:
-            return
-        
         for model in self.training_models:
             if hasattr(model, 'train') and callable(model.train):
                 model.train()
 
-    def eval_mode(self):
-        if self.training_models is None:
-            return
-        
+    def eval_mode(self):   
         for model in self.training_models:
             if hasattr(model, 'eval') and callable(model.eval):
                 model.eval()
