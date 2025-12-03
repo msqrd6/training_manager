@@ -8,7 +8,8 @@ from torch.utils.data import DataLoader
 
 class TrainingManager():
     def __init__(self, 
-                 training_models: list[nn.Module],
+                 trainable_modules: list[nn.Module],
+                 frozen_modules: list[nn.Module],
                  dataloader: DataLoader,
                  num_epochs: int,
                  save_every_n_epochs: int = None,
@@ -28,7 +29,7 @@ class TrainingManager():
         self.num_epochs = num_epochs
         self.save_every_n_epochs = save_every_n_epochs
 
-        self.training_models = training_models
+        self.trainable_modules = trainable_modules
 
         self.total_step = self.dataset_len * self.num_epochs
         self.current_iter = 0
@@ -62,6 +63,10 @@ class TrainingManager():
         self.valid_loss = 0.0
         self.val_log = []
 
+        for module in frozen_modules:
+            if hasattr(module, 'eval') and callable(module.eval):
+                module.eval()
+
         # set train mode
         self.train_mode()
 
@@ -74,14 +79,14 @@ class TrainingManager():
 
 
     def train_mode(self):
-        for model in self.training_models:
-            if hasattr(model, 'train') and callable(model.train):
-                model.train()
+        for module in self.trainable_modules:
+            if hasattr(module, 'train') and callable(module.train):
+                module.train()
 
     def eval_mode(self):   
-        for model in self.training_models:
-            if hasattr(model, 'eval') and callable(model.eval):
-                model.eval()
+        for module in self.trainable_modules:
+            if hasattr(module, 'eval') and callable(module.eval):
+                module.eval()
 
 
     def batch_step(self, loss, **kwargs) -> None:
