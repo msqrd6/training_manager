@@ -8,7 +8,8 @@ PyTorchの学習ループを簡潔に記述するためのユーティリティ�
 - 学習・検証損失の自動ロギングとプロット
 - エポックごとのチェックポイント保存タイミングの管理
 - 検証データローダーの部分的な使用に対応
-- 複数モデルの学習・評価モード切り替えに対応
+- 複数モジュールの学習・評価モード切り替えに対応
+- 学習対象モジュールと凍結モジュールの分離管理
 
 ## インストール
 
@@ -39,14 +40,15 @@ valid_dataloader = DataLoader(valid_dataset, batch_size=32, shuffle=False)
 
 # TrainingManagerの初期化
 tm = TrainingManager(
-    train_dataloader,
+    trainable_modules=[model],  # 学習するモジュールをリストで渡す
+    frozen_modules=[vae, text_encoder],  # 凍結するモジュール（評価モードに固定）
+    dataloader=train_dataloader,
     num_epochs=10,
     save_every_n_epochs=2,
     log_interval=100,
     valid_every_n_epochs=1,
     valid_dataloader=valid_dataloader,
     n_batches_valid=10,  # バリデーションで使用するバッチ数（省略時は全バッチ）
-    training_models=[model]  # 学習するモデルをリストで渡す
 )
 
 # 学習ループ
@@ -90,6 +92,8 @@ tm.plot(name='training_curve', output_dir='./results')
 
 #### 初期化パラメータ
 
+- `trainable_modules` (list[nn.Module]): 学習対象のモジュールのリスト（学習モードに設定される）
+- `frozen_modules` (list[nn.Module]): 凍結するモジュールのリスト（評価モードに固定される）
 - `dataloader` (DataLoader): 学習用データローダー
 - `num_epochs` (int): 学習エポック数
 - `save_every_n_epochs` (int, optional): チェックポイント保存間隔
@@ -97,15 +101,14 @@ tm.plot(name='training_curve', output_dir='./results')
 - `valid_every_n_epochs` (int, optional): バリデーション実行間隔
 - `valid_dataloader` (DataLoader, optional): バリデーション用データローダー
 - `n_batches_valid` (int, optional): バリデーションで使用するバッチ数（省略時は全バッチ）
-- `training_models` (list, optional): 学習対象のモデルのリスト（複数指定可能）
 
 #### 主要メソッド・プロパティ
 
 ##### `train_mode()`
-登録された全モデルを学習モードに切り替えます。
+`trainable_modules`に登録された全モジュールを学習モードに切り替えます。
 
 ##### `eval_mode()`
-登録された全モデルを評価モードに切り替えます。
+`trainable_modules`に登録された全モジュールを評価モードに切り替えます。
 
 ##### `epochs` (プロパティ)
 エポック数のイテレータを返します。
@@ -114,7 +117,7 @@ tm.plot(name='training_curve', output_dir='./results')
 学習用データローダーを返します。
 
 ##### `valid_dataloader` (プロパティ)
-バリデーション用データローダー（必要に応じて制限付き）を返します。
+バリデーション用データローダー（必要に応じて制限付き）を返します。`n_batches_valid`で指定されたバッチ数分のみを返すイテレータです。
 
 ##### `batch_step(loss, **kwargs)`
 バッチごとの処理を行います。損失の記録とプログレスバーの更新を実行します。
@@ -128,13 +131,13 @@ tm.plot(name='training_curve', output_dir='./results')
 - `**kwargs`: 追加で表示する情報
 
 ##### `valid_start()`
-バリデーション開始時に呼び出します。登録された全モデルを評価モードに切り替え、勾配計算を無効化します。
+バリデーション開始時に呼び出します。`trainable_modules`を評価モードに切り替え、勾配計算を無効化します。
 
 ##### `valid_step(loss)`
 バリデーションの各バッチで呼び出し、損失を記録します。
 
 ##### `valid_end()`
-バリデーション終了時に呼び出し、平均損失を計算してログに記録します。学習モードに戻し、勾配計算を有効化します。
+バリデーション終了時に呼び出し、平均損失を計算してログに記録します。`trainable_modules`を学習モードに戻し、勾配計算を有効化します。
 
 ##### `is_savepoint()`
 現在のエポックがチェックポイント保存のタイミングかを判定します。
@@ -171,3 +174,4 @@ python example.py
 - このクラスはPyTorchの学習ループを補助するものであり、学習ロジック自体は実装する必要があります
 - `log_interval`を設定しない場合、詳細な損失ログは記録されません
 - バリデーションデータローダーを指定しない場合、バリデーション機能は無効になります
+- `frozen_modules`に指定したモジュールは初期化時に評価モードに設定され、その後も評価モードを維持します
