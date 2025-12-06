@@ -93,7 +93,7 @@ tm.plot(name='training_curve', output_dir='./results')
 #### 初期化パラメータ
 
 - `trainable_modules` (list[nn.Module]): 学習対象のモジュールのリスト（学習モードに設定される）
-- `frozen_modules` (list[nn.Module]): 凍結するモジュールのリスト（評価モードに固定される）
+- `frozen_modules` (list[nn.Module], optional): 凍結するモジュールのリスト（評価モードに固定される）デフォルト: []
 - `dataloader` (DataLoader): 学習用データローダー
 - `num_epochs` (int): 学習エポック数
 - `save_every_n_epochs` (int, optional): チェックポイント保存間隔
@@ -104,11 +104,16 @@ tm.plot(name='training_curve', output_dir='./results')
 
 #### 主要メソッド・プロパティ
 
-##### `train_mode()`
+##### `train()`
 `trainable_modules`に登録された全モジュールを学習モードに切り替えます。
 
-##### `eval_mode()`
+##### `eval()`
 `trainable_modules`に登録された全モジュールを評価モードに切り替えます。
+
+##### `get_trainable_params()`
+`trainable_modules`に登録された全モジュールから、`requires_grad=True`のパラメータのリストを取得します。オプティマイザの初期化時に使用できます。
+
+**戻り値**: `list[torch.Tensor]` - 学習対象のパラメータのリスト
 
 ##### `epochs` (プロパティ)
 エポック数のイテレータを返します。
@@ -131,19 +136,25 @@ tm.plot(name='training_curve', output_dir='./results')
 - `**kwargs`: 追加で表示する情報
 
 ##### `valid_start()`
-バリデーション開始時に呼び出します。`trainable_modules`を評価モードに切り替え、勾配計算を無効化します。
+バリデーション開始時に呼び出します。`trainable_modules`を評価モードに切り替え（`eval()`を呼び出し）、勾配計算を無効化します。
 
 ##### `valid_step(loss)`
 バリデーションの各バッチで呼び出し、損失を記録します。
 
+- `loss`: 損失値（torch.Tensorまたはfloat）
+
 ##### `valid_end()`
-バリデーション終了時に呼び出し、平均損失を計算してログに記録します。`trainable_modules`を学習モードに戻し、勾配計算を有効化します。
+バリデーション終了時に呼び出し、平均損失を計算してログに記録します。`trainable_modules`を学習モードに戻し（`train()`を呼び出し）、勾配計算を有効化します。
 
 ##### `is_savepoint()`
 現在のエポックがチェックポイント保存のタイミングかを判定します。
 
+**戻り値**: `bool` - 保存タイミングの場合True
+
 ##### `is_validpoint()`
 現在のエポックがバリデーション実行のタイミングかを判定します。
+
+**戻り値**: `bool` - バリデーションタイミングの場合True
 
 ##### `plot(name=None, output_dir=None)`
 学習曲線とバリデーション曲線をプロットして保存します。

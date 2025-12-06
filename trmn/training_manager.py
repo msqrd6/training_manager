@@ -9,16 +9,15 @@ from torch.utils.data import DataLoader
 class TrainingManager():
     def __init__(self, 
                  trainable_modules: list[nn.Module],
-                 frozen_modules: list[nn.Module],
                  dataloader: DataLoader,
                  num_epochs: int,
                  save_every_n_epochs: int = None,
+                 frozen_modules: list[nn.Module]=[],
                  log_interval: int = None,
                  valid_dataloader: DataLoader = None,
                  valid_every_n_epochs: int = None,
                  n_batches_valid: int = None,
                  ):
-        
         
         self.dataloader = dataloader
         try:
@@ -68,7 +67,7 @@ class TrainingManager():
                 module.eval()
 
         # set train mode
-        self.train_mode()
+        self.train()
 
     @property
     def valid_dataloader(self):
@@ -78,15 +77,23 @@ class TrainingManager():
         return islice(self._raw_valid_dataloader, self.n_batches_valid)
 
 
-    def train_mode(self):
+    def train(self):
         for module in self.trainable_modules:
             if hasattr(module, 'train') and callable(module.train):
                 module.train()
 
-    def eval_mode(self):   
+    def eval(self):   
         for module in self.trainable_modules:
             if hasattr(module, 'eval') and callable(module.eval):
                 module.eval()
+
+    def get_trainable_params(self) -> list[torch.Tensor]:
+        trainable_params = []
+        for module in self.trainable_modules:
+            for param in module.parameters():
+                if param.requires_grad:
+                    trainable_params.append(param)
+        return trainable_params
 
 
     def batch_step(self, loss, **kwargs) -> None:
@@ -127,7 +134,7 @@ class TrainingManager():
         self.valid_loss += loss
 
     def valid_start(self):
-        self.eval_mode()
+        self.eval()
         torch.set_grad_enabled(False)
 
     def valid_end(self):
@@ -138,7 +145,7 @@ class TrainingManager():
         self.val_log.append({'step': self.current_iter, 'loss': avg_loss})
         self.valid_loss = 0
         torch.set_grad_enabled(True)
-        self.train_mode()
+        self.train()
 
     def is_savepoint(self) -> bool:
         if self.current_epoch > self.num_epochs: return False # 終了後はFalse

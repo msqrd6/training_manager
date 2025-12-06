@@ -38,6 +38,12 @@ def main():
         n_batches_valid=3 
     )
 
+    """
+    optimizer = optimizer(
+        params = tm.get_trainable_params(),
+    )
+    """
+    
     tm.valid_start()
     for data in tm.valid_dataloader:
         val_loss = random.random() * 10
