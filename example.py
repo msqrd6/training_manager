@@ -6,7 +6,7 @@ from trmn.training_manager import TrainingManager
 
 class MyDataset(Dataset):
     def __init__(self, repeat):
-        self.dataset = [i for i in range(10)]
+        self.dataset = [i for i in range(100)]
         self.repeat = repeat
 
     def __len__(self):
@@ -17,11 +17,11 @@ class MyDataset(Dataset):
         return self.dataset[true_idx]
 
 def main():
-    num_epochs = 5
-    save_every_n_epochs = 2
+    num_epochs = 6
+    save_every_n_epochs = 1
     
-    batch_size = 2
-    repeat = 5
+    batch_size = 1
+    repeat = 1
     
     dataset = MyDataset(repeat=repeat)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -29,13 +29,15 @@ def main():
     valid_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     tm = TrainingManager(
-        dataloader,
-        num_epochs,
-        save_every_n_epochs,
-        log_interval=5,
+        trainable_modules=[],
+        dataloader=dataloader,
+        num_epochs=num_epochs,
+        save_every_n_epochs=save_every_n_epochs,
+        log_interval=50,
         valid_every_n_epochs=1,
         valid_dataloader=valid_dataloader,
-        n_batches_valid=3 
+        n_batches_valid=1,
+        #info_path="temp/trmn_info.json"
     )
 
     """
@@ -51,7 +53,7 @@ def main():
     tm.valid_end()
 
     def forward_process(data):
-        time.sleep(0.01) 
+        time.sleep(0.1) 
         loss = random.random() * 10
         return loss
     
@@ -78,11 +80,15 @@ def main():
                 tm.valid_step(val_loss)
             tm.valid_end()
 
+        
+
         if tm.is_savepoint():
             save_model()
-        
-        tm.plot(tm.current_epoch)
+
+        tm.save_info("temp")
+        #tm.plot(tm.current_epoch)
         tm.epoch_step()
+        
 
     
 

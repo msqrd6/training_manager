@@ -7,6 +7,7 @@ PyTorchの学習ループを簡潔に記述するためのユーティリティ�
 - 学習の進捗をプログレスバーで視覚化
 - 学習・検証損失の自動ロギングとプロット
 - エポックごとのチェックポイント保存タイミングの管理
+- チェックポイントからの学習再開機能
 - 検証データローダーの部分的な使用に対応
 - 複数モジュールの学習・評価モード切り替えに対応
 - 学習対象モジュールと凍結モジュールの分離管理
@@ -86,6 +87,52 @@ for epoch in tm.epochs:
 tm.plot(name='training_curve', output_dir='./results')
 ```
 
+### チェックポイントからの学習再開
+
+学習を途中で中断し、後から再開することができます：
+
+```python
+# 初回の学習
+tm = TrainingManager(
+    trainable_modules=[model],
+    dataloader=train_dataloader,
+    num_epochs=10,
+    save_every_n_epochs=2,
+)
+
+for epoch in tm.epochs:
+    for data in tm.dataloader:
+        # 学習処理
+        ...
+        tm.batch_step(loss)
+    
+    # チェックポイント保存
+    if tm.is_savepoint():
+        torch.save(model.state_dict(), f'checkpoint_epoch_{epoch}.pth')
+        tm.save_info('./checkpoints')  # 学習情報を保存
+    
+    tm.epoch_step()
+
+# 学習を再開する場合
+model.load_state_dict(torch.load('checkpoint_epoch_4.pth'))
+tm = TrainingManager(
+    trainable_modules=[model],
+    dataloader=train_dataloader,
+    num_epochs=10,
+    save_every_n_epochs=2,
+    info_path='./checkpoints/trmn_info.json',  # 保存した学習情報を指定
+)
+
+# エポック5から学習が再開される
+for epoch in tm.epochs:
+    for data in tm.dataloader:
+        # 学習処理
+        ...
+        tm.batch_step(loss)
+    
+    tm.epoch_step()
+```
+
 ## API リファレンス
 
 ### TrainingManager
@@ -101,6 +148,7 @@ tm.plot(name='training_curve', output_dir='./results')
 - `valid_every_n_epochs` (int, optional): バリデーション実行間隔
 - `valid_dataloader` (DataLoader, optional): バリデーション用データローダー
 - `n_batches_valid` (int, optional): バリデーションで使用するバッチ数（省略時は全バッチ）
+- `info_path` (str, optional): 学習情報を保存したJSONファイルのパス。指定すると、そのファイルから学習を再開します
 
 #### 主要メソッド・プロパティ
 
@@ -161,6 +209,12 @@ tm.plot(name='training_curve', output_dir='./results')
 
 - `name` (str, optional): 保存ファイル名（デフォルト: "training_loss"）
 - `output_dir` (str, optional): 保存先ディレクトリ
+
+##### `save_info(output_dir)`
+学習の進捗情報をJSONファイルに保存します。エポック数、損失ログ、バリデーションログなどが含まれます。
+
+- `output_dir` (str): 保存先ディレクトリ（`trmn_info.json`として保存されます）
+
 
 ## サンプルコード
 
