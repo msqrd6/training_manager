@@ -1,1 +1,2 @@
 from .training_manager import TrainingManager
+from accelerator.training_manager import TrainingManager, get_trainable_params
