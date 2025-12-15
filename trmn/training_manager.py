@@ -8,7 +8,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 
 
-class TrainingManager():
+class TrainingManagerBacic():
     def __init__(self, 
                  trainable_modules: list[nn.Module],
                  dataloader: DataLoader,

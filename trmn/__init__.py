@@ -1,2 +1,2 @@
-from .training_manager import TrainingManager
+from .training_manager import TrainingManagerBacic
 from .accelerator.training_manager import TrainingManager, get_trainable_params
