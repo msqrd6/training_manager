@@ -7,6 +7,7 @@ from itertools import islice
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
+from valid_manager import ValidManager
 
 def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
         trainable_params = []
@@ -16,6 +17,8 @@ def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
                     trainable_params.append(param)
         return trainable_params
 
+
+
 class TrainingManager():
     def __init__(self, 
                  trainable_modules: list[nn.Module],
@@ -24,10 +27,8 @@ class TrainingManager():
                  save_every_n_epochs: int = None,
                  log_interval: int = None,
                  accelerator: Accelerator = None,
-                 valid_dataloader: DataLoader = None,
-                 valid_every_n_epochs: int = None,
-                 n_batches_valid: int = None,
-                 info_path: str = None,
+                 valid_manager:ValidManager = None,
+                 checkpoint_dir: str = None,
                  frozen_modules: list[nn.Module]=[],
                  ):
         
@@ -47,18 +48,23 @@ class TrainingManager():
 
         self._save_info_path = None
 
-        self.valid = ValidManager(self,valid_every_n_epochs,valid_dataloader,n_batches_valid)
+        self.valid = valid_manager
+        if self.valid is not None:
+            self.valid.set_training_manager(self)
 
         self.log = {"config":{"num_epochs":0,"total_step":0,"log_interval":0,"save_every_n_epochs":0},
                     "epoch":0,
                     "step":0,
                     "epoch_loss":{} , 
                     "log":[], 
-                    "val_log":[]
+                    "val_log":[],
+                    "lr_log":[],
                     }
-        self.info_path = info_path
+        self.checkpoint_json_name = "trmn_info.json"
 
-        if info_path is None:
+        self.checkpoint_dir = checkpoint_dir
+
+        if self.checkpoint_dir is None:
             self.write_info()
         else:
             self.load_info()
@@ -95,7 +101,8 @@ class TrainingManager():
         return self._raw_dataloader
 
     def load_info(self):
-        with open(self.info_path, "r") as f:
+        json_path = os.path.join(self.checkpoint_dir,self.checkpoint_json_name)
+        with open(json_path, "r") as f:
             info = json.load(f)
 
             self.log = info
@@ -109,8 +116,10 @@ class TrainingManager():
             epoch = self.current_step // (self.epoch_steps) + 1
 
             self.current_epoch = epoch
+        
+        if self.accelerator is not None:
+            self.accelerator.load_state(self.checkpoint_dir)
             
-
         
 
     def write_info(self):
@@ -129,10 +138,11 @@ class TrainingManager():
             else:
                 os.makedirs(output_dir,exist_ok=True)
         
-        self._save_info_path = self._save_info_path if self._save_info_path else os.path.join(output_dir, "trmn_info.json")
+        self._save_info_path = self._save_info_path if self._save_info_path else os.path.join(output_dir, self.checkpoint_json_name)
         
-        self.log["step"] = self.current_step
         self.log["epoch_loss"][str(self.current_epoch)]=self._get_avg_epoch_loss()
+
+        self.write_info()
 
         with open(self._save_info_path, "w") as f:
             json.dump(self.log, f, indent=4) # indent=4で見やすく保存
@@ -189,14 +199,16 @@ class TrainingManager():
 
         self.current_epoch += 1 
         self.epoch_loss = 0
-
-        self.log["epoch"] = self.current_epoch
       
         if self.current_epoch <= self.num_epochs:
             self.progress_bar.set_description(f"Epoch {self.current_epoch}/{self.num_epochs}")
 
+        
 
-    
+    def lr_log(self,lr=None):
+        if lr is not None:
+            self.log["lr_log"].append({"step":self.current_step,"lr":lr})
+
 
     def is_savepoint(self) -> bool:
         if self.current_epoch > self.num_epochs: return False # 終了後はFalse
@@ -207,6 +219,7 @@ class TrainingManager():
         return False
 
     def is_validpoint(self) -> bool:
+        if self.valid is None: return False
         if self.current_epoch > self.num_epochs: return False
         if self.valid.every_n_epochs is not None: 
             if self.current_epoch == self.num_epochs:
@@ -228,6 +241,11 @@ class TrainingManager():
                 v_steps = [item['step'] for item in self.log["val_log"]]
                 v_losses = [item['loss'] for item in self.log["val_log"]]
                 plt.plot(v_steps, v_losses, label='Validation Loss', marker='o', linestyle='--', color='orange')
+
+            if len(self.log["lr_log"]) > 0:
+                steps = [item['step'] for item in self.log["lr_log"]]
+                lr = [item['lr'] for item in self.log["lr_log"]]
+                plt.plot(steps, lr, label='lr', linestyle='--', color='yellow')
             
             plt.xlabel('Steps')
             plt.ylabel('Loss')
@@ -246,47 +264,3 @@ class TrainingManager():
             plt.close()
 
 
-class ValidManager():
-    def __init__(self,tm:TrainingManager,valid_every_n_epochs=None,valid_dataloader=None,n_batches_valid=None):
-        super().__init__()
-        self.tm = tm
-        self.every_n_epochs = valid_every_n_epochs
-        self.loss = 0.0
-
-        # バッチ数の決定
-        if valid_dataloader is not None:
-            if n_batches_valid is None:
-                self.n_batches_valid = len(valid_dataloader)
-            else:
-                self.n_batches_valid = n_batches_valid
-        else:
-            self.n_batches_valid = 0
-
-        self._dataloader = valid_dataloader
-
-    @property
-    def dataloader(self):
-        if self._dataloader is None:
-            return []
-
-        return islice(self._dataloader, self.n_batches_valid)
-    
-    def step_end(self, loss):
-        loss = loss.item() if hasattr(loss, 'item') else loss
-        self.loss += loss
-
-    def start(self):
-        self.tm.eval()
-        torch.set_grad_enabled(False)
-
-    def end(self):
-        if self.n_batches_valid > 0:
-            
-            avg_loss = self.loss / self.n_batches_valid
-        else:
-            avg_loss = 0
-
-        self.tm.log["val_log"].append({'step': self.tm.current_step, 'loss': avg_loss})
-        self.loss = 0
-        torch.set_grad_enabled(True)
-        self.tm.train()
