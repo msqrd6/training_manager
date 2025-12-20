@@ -10,7 +10,7 @@ from accelerate import Accelerator
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:#型チェックに使用
-    from training_manager import TrainingManager
+    from trmn.training_manager import TrainingManager
 
 
 class ValidManager():

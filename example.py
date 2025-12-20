@@ -1,8 +1,9 @@
 import time
 import random
 from torch.utils.data import DataLoader, Dataset
-from trmn.training_manager import TrainingManager
-
+from trmn import TrainingManager,ValidManager
+from accelerate import Accelerator
+import torch
 
 class MyDataset(Dataset):
     def __init__(self, repeat):
@@ -17,16 +18,36 @@ class MyDataset(Dataset):
         return self.dataset[true_idx]
 
 def main():
-    num_epochs = 6
+    num_epochs = 5
     save_every_n_epochs = 1
+
+    accelerator = Accelerator()
     
     batch_size = 1
     repeat = 1
+
+    model = torch.nn.Sequential(torch.nn.Linear(10,10))
     
     dataset = MyDataset(repeat=repeat)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
     valid_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    """
+    optimizer = optimizer(
+        params = get_trainable_params(model),
+    )
+    """
+
+    model, dataloader,valid_dataloader = accelerator.prepare(
+        model, dataloader, valid_dataloader
+    )
+
+    vm = ValidManager(
+        valid_every_n_epochs=1,
+        valid_dataloader=valid_dataloader,
+        n_batches_valid=None,
+    )
 
     tm = TrainingManager(
         trainable_modules=[],
@@ -34,26 +55,14 @@ def main():
         num_epochs=num_epochs,
         save_every_n_epochs=save_every_n_epochs,
         log_interval=50,
-        valid_every_n_epochs=1,
-        valid_dataloader=valid_dataloader,
-        n_batches_valid=1,
-        #info_path="temp/trmn_info.json"
+        accelerator=accelerator,
+        valid_manager=vm,
     )
 
-    """
-    optimizer = optimizer(
-        params = tm.get_trainable_params(),
-    )
-    """
     
-    tm.valid_start()
-    for data in tm.valid_dataloader:
-        val_loss = random.random() * 10
-        tm.valid_step(val_loss)
-    tm.valid_end()
 
     def forward_process(data):
-        time.sleep(0.1) 
+        time.sleep(0.05) 
         loss = random.random() * 10
         return loss
     
@@ -70,27 +79,30 @@ def main():
             # optimizer.step()
             # lr_scheduler.step()
             # optimizer.zero_grad()
+
             
-            tm.batch_step(loss)
+            
+            tm.step_end(loss)
 
         if tm.is_validpoint():
-            tm.valid_start()
-            for data in tm.valid_dataloader:
+            tm.valid.start()
+            for data in tm.valid.dataloader:
                 val_loss = random.random() * 10
-                tm.valid_step(val_loss)
-            tm.valid_end()
+                tm.valid.step_end(val_loss)
+            tm.valid.end()
 
         
 
         if tm.is_savepoint():
             save_model()
 
-        tm.save_info("temp")
-        #tm.plot(tm.current_epoch)
-        tm.epoch_step()
-        
+        lr = 0.3
+        tm.lr_log(lr)
 
-    
+        tm.save_checkpoint("checkpoint")
+        tm.plot(f"plot")
+        tm.epoch_end()
+
 
 if __name__ == "__main__":
     main()
