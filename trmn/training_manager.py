@@ -234,24 +234,40 @@ class TrainingManager():
             steps = [item['step'] for item in self.log["log"]]
             losses = [item['loss'] for item in self.log["log"]]
 
-            plt.figure(figsize=(10, 5))
-            plt.plot(steps, losses, label='Training Loss')
+            fig, ax1 = plt.subplots(figsize=(10, 5)) # ax1を作成
 
+            # Lossの描画 (左軸)
+            ax1.set_xlabel('Steps')
+            ax1.set_ylabel('Loss', color='tab:blue')
+            ax1.plot(steps, losses, label='Training Loss', color='tab:blue')
+            ax1.tick_params(axis='y', labelcolor='tab:blue')
+            ax1.grid(True)
+
+            # Validation Lossも左軸でOK
             if len(self.log["val_log"]) > 0:
                 v_steps = [item['step'] for item in self.log["val_log"]]
                 v_losses = [item['loss'] for item in self.log["val_log"]]
-                plt.plot(v_steps, v_losses, label='Validation Loss', marker='o', linestyle='--', color='orange')
+                ax1.plot(v_steps, v_losses, label='Validation Loss', marker='o', linestyle='--', color='orange')
 
+            # LRの描画 (右軸: twinx)
             if len(self.log["lr_log"]) > 0:
-                steps = [item['step'] for item in self.log["lr_log"]]
-                lr = [item['lr'] for item in self.log["lr_log"]]
-                plt.plot(steps, lr, label='lr', linestyle='--', color='yellow')
-            
-            plt.xlabel('Steps')
-            plt.ylabel('Loss')
-            plt.title('Training Loss')
-            plt.legend()
-            plt.grid(True)
+                ax2 = ax1.twinx()  # 右軸を作成
+                ax2.set_ylabel('Learning Rate', color='tab:red')
+                
+                lr_steps = [item['step'] for item in self.log["lr_log"]]
+                lr_values = [item['lr'] for item in self.log["lr_log"]]
+                
+                ax2.plot(lr_steps, lr_values, label='Learning Rate', linestyle='--', color='tab:red', alpha=0.6)
+                ax2.tick_params(axis='y', labelcolor='tab:red')
+                
+                # 凡例をまとめて表示するための工夫
+                lines1, labels1 = ax1.get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+            else:
+                ax1.legend(loc='upper right')
+
+            plt.title('Training Metrics')
 
             name = "training_loss" if name is None else name
             if output_dir is None:
