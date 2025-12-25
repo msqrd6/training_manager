@@ -56,7 +56,7 @@ class ValidManager():
         else:
             avg_loss = 0
 
-        self.tm.log["val_log"].append({'step': self.tm.current_step, 'loss': avg_loss})
+        self.tm.log["val_log"][str(self.tm.current_step)] = avg_loss
         self.loss = 0
         torch.set_grad_enabled(True)
         self.tm.train()

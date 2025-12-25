@@ -1,242 +1,181 @@
 # TrainingManager
-
-PyTorchの学習ループを簡潔に記述するためのユーティリティクラスです。プログレスバー表示、損失のロギング、バリデーション、定期的なチェックポイント保存などの機能を提供します。
-
-## 特徴
-
-- 学習の進捗をプログレスバーで視覚化
-- 学習・検証損失の自動ロギングとプロット
-- エポックごとのチェックポイント保存タイミングの管理
-- チェックポイントからの学習再開機能
-- 検証データローダーの部分的な使用に対応
-- 複数モジュールの学習・評価モード切り替えに対応
-- 学習対象モジュールと凍結モジュールの分離管理
+PyTorchの学習ループを簡潔に記述するためのユーティリティクラスです。
 
 ## インストール
 
-### 方法1: ファイルをコピーして使う場合
-リポジトリ内の `training_manager.py` をあなたのプロジェクトフォルダにコピーしてください。
-その上で、必要なライブラリをインストールします:
-```bash
-pip install torch matplotlib tqdm
-```
-
-### 方法2: pipでインストールする場合
-Git経由でライブラリとしてインストールすることも可能です:
 ```bash
 pip install git+https://github.com/msqrd6/training_manager.git
 ```
 
-## 使い方
-
-### 基本的な使用例
-
+## 基本的な使い方
 ```python
-from torch.utils.data import DataLoader
-from trmn import TrainingManager
-
-# データローダーの準備
-train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-valid_dataloader = DataLoader(valid_dataset, batch_size=32, shuffle=False)
+from trmn import TrainingManager, get_trainable_params
 
 # TrainingManagerの初期化
 tm = TrainingManager(
-    trainable_modules=[model],  # 学習するモジュールをリストで渡す
-    frozen_modules=[vae, text_encoder],  # 凍結するモジュール（評価モードに固定）
+    trainable_modules=[model],
     dataloader=train_dataloader,
     num_epochs=10,
     save_every_n_epochs=2,
     log_interval=100,
-    valid_every_n_epochs=1,
+    checkpoint_dir='./checkpoints',  # チェックポイント保存先
+)
+
+# オプティマイザの初期化
+optimizer = torch.optim.Adam(get_trainable_params(model), lr=1e-4)
+
+# 学習ループ
+for epoch in tm.epochs:
+    for data in tm.dataloader:
+        loss = model(data)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        tm.step_end(loss)  # 損失を記録
+    
+    if tm.is_savepoint():
+        tm.save_checkpoint()  # チェックポイント保存
+    
+    tm.epoch_end()  # エポック終了処理
+
+# 学習曲線をプロット
+tm.plot(output_dir='./results')
+```
+
+## バリデーション付きの例
+
+```python
+from trmn import TrainingManager, ValidManager
+
+# ValidManagerの初期化
+valid_manager = ValidManager(
     valid_dataloader=valid_dataloader,
-    n_batches_valid=10,  # バリデーションで使用するバッチ数（省略時は全バッチ）
+    valid_every_n_epochs=1,
+    n_batches_valid=10  # 使用するバッチ数（省略時は全バッチ）
+)
+
+# TrainingManagerの初期化
+tm = TrainingManager(
+    trainable_modules=[model],
+    dataloader=train_dataloader,
+    num_epochs=10,
+    valid_manager=valid_manager,
 )
 
 # 学習ループ
 for epoch in tm.epochs:
     for data in tm.dataloader:
-        # 順伝播
-        output = model(data)
-        loss = criterion(output, target)
-        
-        # 逆伝播
+        loss = model(data)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        
-        # 損失を記録
-        tm.batch_step(loss)
+        tm.step_end(loss)
     
     # バリデーション
     if tm.is_validpoint():
-        tm.valid_start()  # 評価モードに切り替え、勾配計算を無効化
-        for data in tm.valid_dataloader:
-            output = model(data)
-            val_loss = criterion(output, target)
-            tm.valid_step(val_loss)
-        tm.valid_end()  # 学習モードに戻し、勾配計算を有効化
+        tm.valid.start()  # 評価モードに切り替え
+        for data in tm.valid.dataloader:
+            val_loss = model(data)
+            tm.valid.step_end(val_loss)
+        tm.valid.end()  # 学習モードに戻す
     
-    # チェックポイント保存
-    if tm.is_savepoint():
-        torch.save(model.state_dict(), f'checkpoint_epoch_{epoch}.pth')
-    
-    # エポック終了処理
-    tm.epoch_step()
-
-# 学習曲線をプロット
-tm.plot(name='training_curve', output_dir='./results')
+    tm.epoch_end()
 ```
 
-### チェックポイントからの学習再開
-
-学習を途中で中断し、後から再開することができます：
+## Accelerator対応
 
 ```python
-# 初回の学習
+from accelerate import Accelerator
+
+accelerator = Accelerator()
+model, optimizer, train_dataloader = accelerator.prepare(
+    model, optimizer, train_dataloader
+)
+
 tm = TrainingManager(
     trainable_modules=[model],
     dataloader=train_dataloader,
     num_epochs=10,
-    save_every_n_epochs=2,
+    accelerator=accelerator,
+    checkpoint_dir='./checkpoints',
 )
 
-for epoch in tm.epochs:
-    for data in tm.dataloader:
-        # 学習処理
-        ...
-        tm.batch_step(loss)
-    
-    # チェックポイント保存
-    if tm.is_savepoint():
-        torch.save(model.state_dict(), f'checkpoint_epoch_{epoch}.pth')
-        tm.save_info('./checkpoints')  # 学習情報を保存
-    
-    tm.epoch_step()
-
-# 学習を再開する場合
-model.load_state_dict(torch.load('checkpoint_epoch_4.pth'))
-tm = TrainingManager(
-    trainable_modules=[model],
-    dataloader=train_dataloader,
-    num_epochs=10,
-    save_every_n_epochs=2,
-    info_path='./checkpoints/trmn_info.json',  # 保存した学習情報を指定
-)
-
-# エポック5から学習が再開される
-for epoch in tm.epochs:
-    for data in tm.dataloader:
-        # 学習処理
-        ...
-        tm.batch_step(loss)
-    
-    tm.epoch_step()
+# 学習ループは同じ
 ```
 
+## チェックポイントからの再開
+
+`checkpoint_dir`を指定すると、自動的にチェックポイントから再開されます：
+
+```python
+tm = TrainingManager(
+    trainable_modules=[model],
+    dataloader=train_dataloader,
+    num_epochs=10,
+    checkpoint_dir='./checkpoints',  # 既存のチェックポイントがあれば自動で読み込み
+)
+```
 ## API リファレンス
 
 ### TrainingManager
 
 #### 初期化パラメータ
 
-- `trainable_modules` (list[nn.Module]): 学習対象のモジュールのリスト（学習モードに設定される）
-- `frozen_modules` (list[nn.Module], optional): 凍結するモジュールのリスト（評価モードに固定される）デフォルト: []
+- `trainable_modules` (list[nn.Module]): 学習対象のモジュール
 - `dataloader` (DataLoader): 学習用データローダー
 - `num_epochs` (int): 学習エポック数
 - `save_every_n_epochs` (int, optional): チェックポイント保存間隔
 - `log_interval` (int, optional): 損失ログの記録間隔（バッチ単位）
-- `valid_every_n_epochs` (int, optional): バリデーション実行間隔
+- `accelerator` (Accelerator, optional): Acceleratorインスタンス
+- `valid_manager` (ValidManager, optional): ValidManagerインスタンス
+- `checkpoint_dir` (str, optional): チェックポイント保存先ディレクトリ
+- `frozen_modules` (list[nn.Module], optional): 凍結するモジュール
+
+#### 主要メソッド
+
+- `step_end(loss, **kwargs)`: バッチ終了時に呼び出し、損失を記録
+- `epoch_end(**kwargs)`: エポック終了時に呼び出し
+- `save_checkpoint()`: チェックポイントを保存
+- `is_savepoint()`: 保存タイミングかを判定
+- `is_validpoint()`: バリデーションタイミングかを判定
+- `plot(output_dir, file_name)`: 学習曲線をプロット
+- `lr_log(lr)`: 学習率を記録
+- `train()`: 学習モードに切り替え
+- `eval()`: 評価モードに切り替え
+
+#### プロパティ
+
+- `epochs`: エポックのイテレータ
+- `dataloader`: 学習用データローダー（再開時は途中から）
+
+### ValidManager
+
+#### 初期化パラメータ
+
 - `valid_dataloader` (DataLoader, optional): バリデーション用データローダー
-- `n_batches_valid` (int, optional): バリデーションで使用するバッチ数（省略時は全バッチ）
-- `info_path` (str, optional): 学習情報を保存したJSONファイルのパス。指定すると、そのファイルから学習を再開します
+- `valid_every_n_epochs` (int, optional): バリデーション実行間隔
+- `n_batches_valid` (int, optional): 使用するバッチ数
 
-#### 主要メソッド・プロパティ
+#### 主要メソッド
 
-##### `train()`
-`trainable_modules`に登録された全モジュールを学習モードに切り替えます。
+- `start()`: バリデーション開始（評価モードに切り替え）
+- `step_end(loss)`: バリデーション損失を記録
+- `end()`: バリデーション終了（学習モードに戻す）
 
-##### `eval()`
-`trainable_modules`に登録された全モジュールを評価モードに切り替えます。
+#### プロパティ
 
-##### `get_trainable_params()`
-`trainable_modules`に登録された全モジュールから、`requires_grad=True`のパラメータのリストを取得します。オプティマイザの初期化時に使用できます。
+- `dataloader`: バリデーション用データローダー
 
-**戻り値**: `list[torch.Tensor]` - 学習対象のパラメータのリスト
+### get_trainable_params(*trainable_modules)
 
-##### `epochs` (プロパティ)
-エポック数のイテレータを返します。
+学習対象のパラメータを取得する関数。オプティマイザの初期化に使用します。
 
-##### `dataloader` (プロパティ)
-学習用データローダーを返します。
-
-##### `valid_dataloader` (プロパティ)
-バリデーション用データローダー（必要に応じて制限付き）を返します。`n_batches_valid`で指定されたバッチ数分のみを返すイテレータです。
-
-##### `batch_step(loss, **kwargs)`
-バッチごとの処理を行います。損失の記録とプログレスバーの更新を実行します。
-
-- `loss`: 損失値（torch.Tensorまたはfloat）
-- `**kwargs`: プログレスバーに追加表示する情報
-
-##### `epoch_step(**kwargs)`
-エポック終了時の処理を行います。エポック平均損失を表示し、内部カウンタを更新します。
-
-- `**kwargs`: 追加で表示する情報
-
-##### `valid_start()`
-バリデーション開始時に呼び出します。`trainable_modules`を評価モードに切り替え（`eval()`を呼び出し）、勾配計算を無効化します。
-
-##### `valid_step(loss)`
-バリデーションの各バッチで呼び出し、損失を記録します。
-
-- `loss`: 損失値（torch.Tensorまたはfloat）
-
-##### `valid_end()`
-バリデーション終了時に呼び出し、平均損失を計算してログに記録します。`trainable_modules`を学習モードに戻し（`train()`を呼び出し）、勾配計算を有効化します。
-
-##### `is_savepoint()`
-現在のエポックがチェックポイント保存のタイミングかを判定します。
-
-**戻り値**: `bool` - 保存タイミングの場合True
-
-##### `is_validpoint()`
-現在のエポックがバリデーション実行のタイミングかを判定します。
-
-**戻り値**: `bool` - バリデーションタイミングの場合True
-
-##### `plot(name=None, output_dir=None)`
-学習曲線とバリデーション曲線をプロットして保存します。
-
-- `name` (str, optional): 保存ファイル名（デフォルト: "training_loss"）
-- `output_dir` (str, optional): 保存先ディレクトリ
-
-##### `save_info(output_dir)`
-学習の進捗情報をJSONファイルに保存します。エポック数、損失ログ、バリデーションログなどが含まれます。
-
-- `output_dir` (str): 保存先ディレクトリ（`trmn_info.json`として保存されます）
-
-
-## サンプルコード
-
-リポジトリには完全な動作例が `example.py` に含まれています。実行方法：
-
-```bash
-python example.py
+```python
+optimizer = torch.optim.Adam(get_trainable_params(model), lr=1e-4)
 ```
-
-このサンプルでは、ダミーデータを使用して学習ループ、バリデーション、チェックポイント保存、損失プロットの一連の流れを確認できます。
 
 ## ライセンス
 
-[MIT License](LICENSE.md)
-
-## 貢献
-
-バグ報告や機能リクエストは、GitHubのIssueでお願いします。プルリクエストも歓迎します。
-
-## 注意事項
-
-- このクラスはPyTorchの学習ループを補助するものであり、学習ロジック自体は実装する必要があります
-- `log_interval`を設定しない場合、詳細な損失ログは記録されません
-- バリデーションデータローダーを指定しない場合、バリデーション機能は無効になります
-- `frozen_modules`に指定したモジュールは初期化時に評価モードに設定され、その後も評価モードを維持します
+MIT License

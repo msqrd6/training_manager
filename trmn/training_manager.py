@@ -8,6 +8,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from trmn.valid_manager import ValidManager
+import pandas as pd
 
 def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
         trainable_params = []
@@ -16,7 +17,6 @@ def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
                 if param.requires_grad:
                     trainable_params.append(param)
         return trainable_params
-
 
 
 class TrainingManager():
@@ -34,19 +34,16 @@ class TrainingManager():
         
         # init
         self._raw_dataloader = dataloader
-        self.epoch_steps = len(self._raw_dataloader)
+        self.steps_per_epoch = len(self._raw_dataloader)
         self.num_epochs = num_epochs
         self.current_epoch = 1
-        self.total_step = self.epoch_steps * self.num_epochs
+        self.total_step = self.steps_per_epoch * self.num_epochs
         self.current_step = 0
-        self.epoch_loss = 0
         self.trainable_modules = trainable_modules
         self.log_interval = log_interval
         self.save_every_n_epochs = save_every_n_epochs
 
         self.accelerator = accelerator
-
-        self._save_info_path = None
 
         self.valid = valid_manager
         if self.valid is not None:
@@ -56,18 +53,44 @@ class TrainingManager():
                     "epoch":0,
                     "step":0,
                     "epoch_loss":{} , 
-                    "log":[], 
-                    "val_log":[],
-                    "lr_log":[],
+                    "loss_log":{}, 
+                    "val_log":{},
+                    "lr_log":{},
                     }
-        self.checkpoint_json_name = "trmn_info.json"
-
+        
         self.checkpoint_dir = checkpoint_dir
+        self.checkpoint_json_name = "training_state.json"
 
-        if self.checkpoint_dir is None:
-            self.write_info()
-        else:
-            self.load_info()
+        if self.checkpoint_dir is not None:
+            self._checkpoint_json_path = os.path.join(self.checkpoint_dir, self.checkpoint_json_name)
+
+            if os.path.exists(self._checkpoint_json_path):
+                self._load_state()
+                print("load checkpoint dir")
+            else:
+                os.makedirs(self.checkpoint_dir, exist_ok=True)
+                self.log["config"]["num_epochs"] = self.num_epochs
+                self.log["config"]["total_step"] = self.total_step
+                self.log["config"]["log_interval"] = self.log_interval 
+                self.log["config"]["save_every_n_epochs"] = self.save_every_n_epochs
+
+                with open(self._checkpoint_json_path, "w") as f:
+                    json.dump(self.log, f, indent=4)
+
+                if self.accelerator is not None:
+                    self.accelerator.save_state(self.checkpoint_dir)
+                print("init checkpoint dir")
+            
+
+        self._show_training_conig()
+        
+
+        self.log_interval_loss_sum = 0.0
+        self.epoch_loss_sum = 0
+
+        for module in frozen_modules:
+            if hasattr(module, 'eval') and callable(module.eval):
+                module.eval()
 
         # main progressbar
         self.progress_bar = tqdm(
@@ -76,16 +99,19 @@ class TrainingManager():
             initial=self.current_step
             )
 
-
-        self.log_loss = 0.0
-
-        for module in frozen_modules:
-            if hasattr(module, 'eval') and callable(module.eval):
-                module.eval()
-
         # set train mode
         self.train()
 
+        
+    def _show_training_conig(self):
+        print("---------------training config-----------------")
+        print(f"num_epochs:{self.num_epochs}")
+        print(f"total_steps:{self.total_step}")
+        print(f"log_interval:{False if self.log_interval is None else self.log_interval}")
+        print(f"use_checkpoint:{False if self.checkpoint_dir is None else True}")
+        print(f"use_accelerator:{False if self.accelerator is None else True}")
+        print("-----------------------------------------------")
+        
     @property
     def epochs(self):
         return range(self.current_epoch, self.num_epochs + 1)
@@ -93,14 +119,14 @@ class TrainingManager():
     @property
     def dataloader(self):
         """現在の進捗に合わせて、済んだバッチをスキップしたDataLoaderを返す (Resume対応)"""
-        steps_done_in_epoch = self.current_step % self.epoch_steps
+        steps_done_in_epoch = self.current_step % self.steps_per_epoch
         
         # 途中再開なら islice で先頭をスキップ
         if steps_done_in_epoch > 0:
             return islice(self._raw_dataloader, steps_done_in_epoch, None)
         return self._raw_dataloader
 
-    def load_info(self):
+    def _load_state(self):
         json_path = os.path.join(self.checkpoint_dir,self.checkpoint_json_name)
         with open(json_path, "r") as f:
             info = json.load(f)
@@ -113,43 +139,19 @@ class TrainingManager():
             self.save_every_n_epochs = self.log["config"]["save_every_n_epochs"]
             self.current_step = self.log["step"]
 
-            epoch = self.current_step // (self.epoch_steps) + 1
-
-            self.current_epoch = epoch
+            self.current_epoch = self.current_step // (self.steps_per_epoch) + 1
         
         if self.accelerator is not None:
             self.accelerator.load_state(self.checkpoint_dir)
             
-        
-
-    def write_info(self):
-        self.log["epoch"] = self.current_epoch
-        self.log["step"] = self.current_step
-        self.log["config"]["num_epochs"] = self.num_epochs
-        self.log["config"]["total_step"] = self.total_step
-        self.log["config"]["log_interval"] = self.log_interval 
-        self.log["config"]["save_every_n_epochs"] = self.save_every_n_epochs
-
-
-    def save_checkpoint(self,output_dir:str=None):
-        if self._save_info_path is None:
-            if output_dir is None:
-                return
-            else:
-                os.makedirs(output_dir,exist_ok=True)
-        
-        self._save_info_path = self._save_info_path if self._save_info_path else os.path.join(output_dir, self.checkpoint_json_name)
-        
-        self.log["epoch_loss"][str(self.current_epoch)]=self._get_avg_epoch_loss()
-
-        self.write_info()
-
-        with open(self._save_info_path, "w") as f:
-            json.dump(self.log, f, indent=4) # indent=4で見やすく保存
-
-        if self.accelerator is not None:
-            self.accelerator.save_state(output_dir)
-
+    
+    def _get_plot_data(self,data:dict[str, float]) -> tuple[list[int], list[float]]:
+        xy = [(int(k),v) for k, v in data.items()]
+        xy.sort()
+        x = [p[0] for p in xy]
+        y = [p[1] for p in xy]
+        return x, y
+    
     def train(self):
         for module in self.trainable_modules:
             if hasattr(module, 'train') and callable(module.train):
@@ -161,53 +163,66 @@ class TrainingManager():
                 module.eval()
 
 
+    def save_checkpoint(self):
+        if self.checkpoint_dir is None:
+            return
+        
+        self.log["epoch_loss"][str(self.current_epoch)]=self.get_epoch_loss()
+        self.log["epoch"] = self.current_epoch
+        self.log["step"] = self.current_step
+
+        with open(self._checkpoint_json_path, "w") as f:
+            json.dump(self.log, f, indent=4)
+
+        if self.accelerator is not None:
+            self.accelerator.save_state(self.checkpoint_dir)
+
 
     def step_end(self, loss, **kwargs) -> None:
         loss = loss.item() if hasattr(loss, 'item') else loss
 
-        self.epoch_loss += loss
+        self.epoch_loss_sum += loss
         self.current_step += 1
 
         if self.log_interval is not None:
-            self.log_loss += loss
+            self.log_interval_loss_sum += loss
             if self.current_step % self.log_interval == 0:
-                avg_loss = self.log_loss / self.log_interval
-                self.log["log"].append({'step': self.current_step, 'loss': avg_loss})
-                self.log_loss = 0.0
+                avg_loss = self.log_interval_loss_sum / self.log_interval
+                #self.log["log"].append({'step': self.current_step, 'loss': avg_loss})
+                self.log["loss_log"][str(self.current_step)] = avg_loss
+                self.log_interval_loss_sum = 0.0
 
         self.progress_bar.update(1)
         self.progress_bar.set_postfix(loss=f"{loss:.4f}", **kwargs)
 
-    def _get_avg_epoch_loss(self):
-        current_epoch_steps = self.current_step % self.epoch_steps
+
+    def get_epoch_loss(self):
+        current_epoch_steps = self.current_step % self.steps_per_epoch
         if current_epoch_steps == 0:
-            current_epoch_steps = self.epoch_steps
+            current_epoch_steps = self.steps_per_epoch
         
-        avg_epoch_loss = self.epoch_loss / current_epoch_steps if current_epoch_steps > 0 else 0
+        avg_epoch_loss = self.epoch_loss_sum / current_epoch_steps if current_epoch_steps > 0 else 0
         return avg_epoch_loss
 
     def epoch_end(self, **kwargs) -> None:
-        avg_epoch_loss = self._get_avg_epoch_loss()
-
-        msg = f"Epoch {self.current_epoch}/{self.num_epochs} | epoch_loss={avg_epoch_loss:.4f}"
+        msg = f"Epoch {self.current_epoch}/{self.num_epochs}"
 
         if kwargs:
             extra_msg = [f"{k}={v}" for k, v in kwargs.items()]
-            msg += ", " + ", ".join(extra_msg)
+            msg += ": " + " | ".join(extra_msg)
 
         tqdm.write(msg)  
 
         self.current_epoch += 1 
-        self.epoch_loss = 0
+        self.epoch_loss_sum = 0
       
         if self.current_epoch <= self.num_epochs:
             self.progress_bar.set_description(f"Epoch {self.current_epoch}/{self.num_epochs}")
 
         
-
     def lr_log(self,lr=None):
         if lr is not None:
-            self.log["lr_log"].append({"step":self.current_step,"lr":lr})
+            self.log["lr_log"][str(self.current_step)] = lr
 
 
     def is_savepoint(self) -> bool:
@@ -229,24 +244,28 @@ class TrainingManager():
         return False
 
 
-    def plot(self, name: str = None, output_dir = None) -> None:
-        if self.log_interval is not None and len(self.log["log"]) > 0:
-            steps = [item['step'] for item in self.log["log"]]
-            losses = [item['loss'] for item in self.log["log"]]
+    def plot(self, output_dir = None, file_name: str = None) -> None:
+        if self.log_interval is not None and len(self.log["loss_log"]) > 0:
+
+            steps, losses = self._get_plot_data(self.log["loss_log"])
+            smooth_losses = pd.Series(losses).ewm(alpha=0.1).mean()
 
             fig, ax1 = plt.subplots(figsize=(10, 5)) # ax1を作成
 
             # Lossの描画 (左軸)
             ax1.set_xlabel('Steps')
             ax1.set_ylabel('Loss', color='tab:blue')
-            ax1.plot(steps, losses, label='Training Loss', color='tab:blue')
+
+            ax1.plot(steps, losses, color='tab:blue', alpha=0.3, label='Training Loss')
+            ax1.plot(steps, smooth_losses, color='tab:blue', linewidth=2, label='Training Loss')
+
+            #ax1.plot(steps, losses, label='Training Loss', color='tab:blue')
             ax1.tick_params(axis='y', labelcolor='tab:blue')
             ax1.grid(True)
 
             # Validation Lossも左軸でOK
             if len(self.log["val_log"]) > 0:
-                v_steps = [item['step'] for item in self.log["val_log"]]
-                v_losses = [item['loss'] for item in self.log["val_log"]]
+                v_steps, v_losses = self._get_plot_data(self.log["val_log"])
                 ax1.plot(v_steps, v_losses, label='Validation Loss', marker='o', linestyle='--', color='orange')
 
             # LRの描画 (右軸: twinx)
@@ -254,8 +273,7 @@ class TrainingManager():
                 ax2 = ax1.twinx()  # 右軸を作成
                 ax2.set_ylabel('Learning Rate', color='tab:red')
                 
-                lr_steps = [item['step'] for item in self.log["lr_log"]]
-                lr_values = [item['lr'] for item in self.log["lr_log"]]
+                lr_steps,lr_values = self._get_plot_data(self.log["lr_log"])
                 
                 ax2.plot(lr_steps, lr_values, label='Learning Rate', linestyle='--', color='tab:red', alpha=0.6)
                 ax2.tick_params(axis='y', labelcolor='tab:red')
@@ -269,12 +287,12 @@ class TrainingManager():
 
             plt.title('Training Metrics')
 
-            name = "training_loss" if name is None else name
+            file_name = "training_loss" if file_name is None else file_name
             if output_dir is None:
-                output_path = f"{name}.png"
+                output_path = f"{file_name}.png"
             else:
                 os.makedirs(output_dir, exist_ok=True)
-                output_path = os.path.join(output_dir, f"{name}.png")
+                output_path = os.path.join(output_dir, f"{file_name}.png")
 
             plt.savefig(output_path)
             plt.close()

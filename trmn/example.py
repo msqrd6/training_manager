@@ -1,9 +1,11 @@
 import time
 import random
 from torch.utils.data import DataLoader, Dataset
-from trmn import TrainingManager,ValidManager
+from training_manager import TrainingManager
+from valid_manager import ValidManager
 from accelerate import Accelerator
 import torch
+import os
 
 class MyDataset(Dataset):
     def __init__(self, repeat):
@@ -20,11 +22,14 @@ class MyDataset(Dataset):
 def main():
     num_epochs = 5
     save_every_n_epochs = 1
+    output_dir = "output"
+    os.makedirs(output_dir,exist_ok=True)
 
     accelerator = Accelerator()
     
     batch_size = 1
     repeat = 1
+    lr = 1e-1
 
     model = torch.nn.Sequential(torch.nn.Linear(10,10))
     
@@ -50,13 +55,14 @@ def main():
     )
 
     tm = TrainingManager(
-        trainable_modules=[],
+        trainable_modules=[model],
         dataloader=dataloader,
         num_epochs=num_epochs,
         save_every_n_epochs=save_every_n_epochs,
-        log_interval=50,
+        log_interval=5,
         accelerator=accelerator,
         valid_manager=vm,
+        checkpoint_dir=os.path.join(output_dir,"checkpoint"),
     )
 
     
@@ -74,15 +80,12 @@ def main():
     for epoch in tm.epochs:
         for data in tm.dataloader:
             loss = forward_process(data)
-
             # loss.backword()
             # optimizer.step()
             # lr_scheduler.step()
             # optimizer.zero_grad()
-
-            
-            
             tm.step_end(loss)
+
 
         if tm.is_validpoint():
             tm.valid.start()
@@ -91,17 +94,15 @@ def main():
                 tm.valid.step_end(val_loss)
             tm.valid.end()
 
-        
 
         if tm.is_savepoint():
             save_model()
 
-        lr = 0.3
+        
         tm.lr_log(lr)
-
-        tm.save_checkpoint("checkpoint")
-        tm.plot(f"plot")
-        tm.epoch_end()
+        tm.save_checkpoint()
+        tm.plot(output_dir)
+        tm.epoch_end(epoch_loss = f"{tm.get_epoch_loss():.4f}")
 
 
 if __name__ == "__main__":

@@ -4,15 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trmn"       # パッケージ名
-version = "0.1.8"             # バージョン
+version = "0.1.9"             # バージョン
 description = "training manager for PyTorch"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [              # 依存ライブラリ
     "torch",
     "tqdm",
-    "matplotlib"
+    "matplotlib",
+    "pandas"
 ]
+
+[project.optional-dependencies]
+accelerate = ["accelerate"]   # 分散学習用（オプション）
 
 [tool.setuptools.packages.find]
 where = ["."]  # 直下のフォルダをパッケージとして探す設定
