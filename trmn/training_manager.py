@@ -3,12 +3,15 @@ import json
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
+import matplotlib
 from itertools import islice
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from trmn.valid_manager import ValidManager
 import pandas as pd
+
+matplotlib.use('Agg')
 
 def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
         trainable_params = []
@@ -244,57 +247,70 @@ class TrainingManager():
         return False
 
 
-    def plot(self, output_dir = None, file_name: str = None) -> None:
-        if self.log_interval is not None and len(self.log["loss_log"]) > 0:
+    def plot(self, output_dir=None, file_name: str = None) -> None:
+        # データの存在確認
+        if self.log_interval is None or len(self.log.get("loss_log", [])) == 0:
+            return
 
+        fig = None
+        try:
             steps, losses = self._get_plot_data(self.log["loss_log"])
             smooth_losses = pd.Series(losses).ewm(alpha=0.1).mean()
 
-            fig, ax1 = plt.subplots(figsize=(10, 5)) # ax1を作成
+            # オブジェクト指向のインターフェースを使用
+            fig, ax1 = plt.subplots(figsize=(10, 5))
 
-            # Lossの描画 (左軸)
+            # Lossの描画
             ax1.set_xlabel('Steps')
             ax1.set_ylabel('Loss', color='tab:blue')
-
-            ax1.plot(steps, losses, color='tab:blue', alpha=0.3, label='Training Loss')
+            # 生データはラベルなし、滑らかな線にラベルを付けると凡例が綺麗
+            ax1.plot(steps, losses, color='tab:blue', alpha=0.3)
             ax1.plot(steps, smooth_losses, color='tab:blue', linewidth=2, label='Training Loss')
-
-            #ax1.plot(steps, losses, label='Training Loss', color='tab:blue')
             ax1.tick_params(axis='y', labelcolor='tab:blue')
             ax1.grid(True)
 
-            # Validation Lossも左軸でOK
-            if len(self.log["val_log"]) > 0:
+            # Validation Loss
+            if len(self.log.get("val_log", [])) > 0:
                 v_steps, v_losses = self._get_plot_data(self.log["val_log"])
                 ax1.plot(v_steps, v_losses, label='Validation Loss', marker='o', linestyle='--', color='orange')
 
-            # LRの描画 (右軸: twinx)
-            if len(self.log["lr_log"]) > 0:
-                ax2 = ax1.twinx()  # 右軸を作成
+            # LRの描画 (右軸)
+            if len(self.log.get("lr_log", [])) > 0:
+                ax2 = ax1.twinx()
                 ax2.set_ylabel('Learning Rate', color='tab:red')
-                
-                lr_steps,lr_values = self._get_plot_data(self.log["lr_log"])
-                
-                ax2.plot(lr_steps, lr_values, label='Learning Rate', linestyle='--', color='tab:red', alpha=0.6)
+                lr_steps, lr_values = self._get_plot_data(self.log["lr_log"])
+                ax2.plot(lr_steps, lr_values, label='Learning Rate', linestyle=':', color='tab:red', alpha=0.6)
                 ax2.tick_params(axis='y', labelcolor='tab:red')
                 
-                # 凡例をまとめて表示するための工夫
+                # 凡例の統合
                 lines1, labels1 = ax1.get_legend_handles_labels()
                 lines2, labels2 = ax2.get_legend_handles_labels()
                 ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
             else:
                 ax1.legend(loc='upper right')
 
-            plt.title('Training Metrics')
+            ax1.set_title('Training Metrics')
 
-            file_name = "training_loss" if file_name is None else file_name
-            if output_dir is None:
-                output_path = f"{file_name}.png"
-            else:
+            # パス構築の安全性向上
+            save_name = file_name if file_name else "training_loss"
+            if not save_name.endswith('.png'):
+                save_name += '.png'
+                
+            if output_dir:
                 os.makedirs(output_dir, exist_ok=True)
-                output_path = os.path.join(output_dir, f"{file_name}.png")
+                output_path = os.path.join(output_dir, save_name)
+            else:
+                output_path = save_name
 
-            plt.savefig(output_path)
-            plt.close()
+            # 保存
+            fig.tight_layout() # レイアウトの重なりを自動調整
+            fig.savefig(output_path)
+            
+        except Exception as e:
+            print(f"Failed to save plot: {e}")
+        finally:
+            # エラーが起きても確実にリソースを解放
+            if fig:
+                plt.close(fig)
 
 
