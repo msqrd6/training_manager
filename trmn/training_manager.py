@@ -2,16 +2,18 @@ import os
 import json
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
-import matplotlib
-from itertools import islice
 from tqdm import tqdm
+from itertools import islice
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
-from trmn.valid_manager import ValidManager
-import pandas as pd
+from pathlib import Path
 
-matplotlib.use('Agg')
+from collections import defaultdict
+from typing import Any, Dict
+
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import pandas as pd
 
 def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
         trainable_params = []
@@ -21,296 +23,340 @@ def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
                     trainable_params.append(param)
         return trainable_params
 
+class MetricsPlotter:
+    """TrainingStateの履歴(step_history)から汎用的でクリアなグラフを描画・保存するクラス"""
+    
+    def __init__(self, state, output_dir: str = "./plots"):
+        self.state = state
+        self.output_dir = output_dir
+        
+        # 出力先ディレクトリが存在しない場合は作成
+        os.makedirs(self.output_dir, exist_ok=True)
 
-class TrainingManager():
-    def __init__(self, 
+        # 汎用的なカラーパレット (Matplotlib標準のtab10に準拠)
+        self.colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple', 'tab:brown']
+
+    def _get_step_plot_data(self, data_dict: dict) -> tuple[list[int], list[float]]:
+        """ステップ単位の辞書データから横軸(X)と縦軸(Y)を生成する専用メソッド"""
+        xy = [(int(k), float(v)) for k, v in data_dict.items()]
+        xy.sort(key=lambda x: x[0])
+        return [p[0] for p in xy], [p[1] for p in xy]
+
+    def _apply_k_formatting(self, ax, xlabel: str):
+        """X軸がStepsのときだけ、数値を 'k' 表記(1000 -> 1k)にする内部メソッド"""
+        if xlabel == "Steps":
+            formatter = ticker.FuncFormatter(lambda x, pos: f"{x/1000:g}k" if x >= 1000 else f"{x:g}")
+            ax.xaxis.set_major_formatter(formatter)
+
+    def _apply_standard_styling(self, ax, title: str, xlabel: str):
+        """グラフ全体に汎用的でクリアなスタイリングを適用する内部メソッド"""
+        ax.grid(True, linestyle='--', alpha=0.7)
+        ax.set_axisbelow(True)
+
+        ax.set_xlabel(xlabel, fontsize=11)
+        ax.set_ylabel("Value", fontsize=11)
+        ax.set_title(title, fontsize=13, pad=15)
+
+        ax.legend(loc='upper right', framealpha=0.9)
+        self._apply_k_formatting(ax, xlabel)
+
+    # =========================================================
+    # プロット関数群
+    # =========================================================
+    def plot(self, filename: str = "all_metrics.png"):
+        """全メトリクスの平滑化されたデータのみを1つのグラフにまとめて描画する"""
+        if not self.state.step_history: 
+            return
+        
+        fig, ax = plt.subplots(figsize=(10, 5))
+        
+        for i, (metric_name, data_dict) in enumerate(self.state.step_history.items()):
+            if not data_dict: 
+                continue
+            
+            x_steps, y_values = self._get_step_plot_data(data_dict)
+            color = self.colors[i % len(self.colors)]
+            
+            # 平滑化データのみを描画
+            smoothed_values = pd.Series(y_values).ewm(alpha=0.05).mean()
+            ax.plot(x_steps, smoothed_values, color=color, linewidth=2.0, label=f"{metric_name} (Smoothed)")
+            
+        self._apply_standard_styling(ax, "Training Metrics (Smoothed)", "Steps")
+        
+        filepath = os.path.join(self.output_dir, filename)
+        fig.tight_layout()
+        fig.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+
+
+    def plot_individual(self, metric_name: str, filename: str = None):
+        """指定した指標の生データと平滑化データを重ねて描画する"""
+        if metric_name not in self.state.step_history or not self.state.step_history[metric_name]: 
+            return
+        
+        x_steps, y_values = self._get_step_plot_data(self.state.step_history[metric_name])
+        
+        fig, ax = plt.subplots(figsize=(8, 5))
+        
+        # 1. 生データ（薄い青、細い線）
+        ax.plot(x_steps, y_values, color='tab:blue', alpha=0.3, linewidth=1.0, label=f'{metric_name} (Raw)')
+        
+        # 2. 平滑化データ（濃い青、太い線）
+        smoothed_values = pd.Series(y_values).ewm(alpha=0.05).mean()
+        ax.plot(x_steps, smoothed_values, color='tab:blue', linewidth=2.0, label=f'{metric_name} (Smoothed)')
+        
+        self._apply_standard_styling(ax, f"{metric_name.capitalize()}", "Steps")
+        
+        if filename is None: 
+            filename = f"{metric_name}.png"
+            
+        filepath = os.path.join(self.output_dir, filename)
+        fig.tight_layout()
+        fig.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+
+
+    def plot_all(self,filename="all.png"):
+        """記録されているすべてのメトリクスについて、plot_individualを一括実行する"""
+        if not self.state.step_history: 
+            return
+        
+        self.plot(filename=filename)
+        for metric_name in self.state.step_history.keys():
+            self.plot_individual(metric_name)
+
+class TrainingState:
+    def __init__(self, **config_kwargs):
+        self.config = config_kwargs
+        self.step_log_interval = config_kwargs.get("step_log_interval", 10)
+        
+        self.epoch = 1
+        self.step = 0
+        self.history = defaultdict(dict)
+        self.step_history = defaultdict(dict)
+        self._running_state = defaultdict(lambda: {"sum": 0.0, "count": 0})
+
+    def step_end(self, **kwargs):
+        self.step += 1
+        for key, value in kwargs.items():
+            val = value.item() if hasattr(value, 'item') else value
+
+            self._running_state[key]["sum"] += val
+            self._running_state[key]["count"] += 1
+
+            if self.step % self.step_log_interval == 0:
+                self.step_history[key][self.step] = val
+
+    def epoch_end(self):
+        for key, data in self._running_state.items():
+            avg_value = data["sum"] / data["count"] if data["count"] > 0 else 0.0
+            self.history[f"epoch_{key}"][self.epoch] = avg_value
+        
+        self._running_state.clear()
+        self.epoch += 1
+
+    def get_current_state(self) -> Dict[str, float]:
+        current_state = {}
+        for key, data in self._running_state.items():
+            if isinstance(data, dict):
+                avg = data["sum"] / data["count"] if data["count"] > 0 else 0.0
+                current_state[key] = avg
+        return current_state
+
+    def state_dict(self) -> Dict[str, Any]:
+        running_state_dict = {
+            "epoch": self.epoch,
+            "step": self.step
+        }
+        for k, v in self._running_state.items():
+            running_state_dict[k] = dict(v)
+
+        return {
+            "config": self.config,
+            "running_state": running_state_dict,
+            "history": {k: dict(v) for k, v in self.history.items()},
+            "step_history": {k: dict(v) for k, v in self.step_history.items()},
+        }
+
+    def load_state_dict(self, state: Dict[str, Any]):
+        self.config = state.get("config", {})
+        
+        self.history.clear()
+        for k, v in state.get("history", {}).items():
+            self.history[k].update(v)
+
+        # 💡 修正箇所: JSONからstep_historyを復元する
+        self.step_history.clear()
+        for k, v in state.get("step_history", {}).items():
+            self.step_history[k].update(v)
+
+        running_state = state.get("running_state", {})
+        self.epoch = running_state.get("epoch", 1)
+        self.step = running_state.get("step", 0)
+        
+        self._running_state.clear()
+        for k, v in running_state.items():
+            if k not in ["epoch", "step"]:
+                self._running_state[k].update(v)
+
+class TrainingManager:
+    """
+    Acceleratorを用いた学習ループの進行と、
+    チェックポイントのセーブ/ロードのみを担当する最小構成クラス。
+    """
+    def __init__(self,
                  trainable_modules: list[nn.Module],
                  dataloader: DataLoader,
                  num_epochs: int,
+                 accelerator: Accelerator,
+                 output_dir: str,
                  save_every_n_epochs: int = None,
-                 log_interval: int = None,
-                 accelerator: Accelerator = None,
-                 valid_manager:ValidManager = None,
-                 checkpoint_dir: str = None,
-                 frozen_modules: list[nn.Module]=[],
+                 step_log_interval: int = 10,
                  ):
         
-        # init
-        self._raw_dataloader = dataloader
-        self.steps_per_epoch = len(self._raw_dataloader)
-        self.num_epochs = num_epochs
-        self.current_epoch = 1
-        self.total_step = self.steps_per_epoch * self.num_epochs
-        self.current_step = 0
         self.trainable_modules = trainable_modules
-        self.log_interval = log_interval
-        self.save_every_n_epochs = save_every_n_epochs
-
+        self._raw_dataloader = dataloader
+        self.num_epochs = num_epochs
         self.accelerator = accelerator
+        self.save_every_n_epochs = save_every_n_epochs
+        self.output_dir = Path(output_dir)
+        self.checkpoint_dir = self.output_dir / "checkpoints"
+        self.plot_dir = self.output_dir / "plots"
 
-        self.valid = valid_manager
-        if self.valid is not None:
-            self.valid.set_training_manager(self)
+        self.steps_per_epoch = len(self._raw_dataloader)
+        self.total_step = self.steps_per_epoch * self.num_epochs
 
-        self.log = {"config":{"num_epochs":0,"total_step":0,"log_interval":0,"save_every_n_epochs":0},
-                    "epoch":0,
-                    "step":0,
-                    "epoch_loss":{} , 
-                    "loss_log":{}, 
-                    "val_log":{},
-                    "lr_log":{},
-                    }
-        
-        self.checkpoint_dir = checkpoint_dir
+        self.training_state = TrainingState(
+            num_epochs=self.num_epochs, 
+            total_steps=self.total_step,
+            steps_per_epoch=self.steps_per_epoch,
+            step_log_interval = step_log_interval
+        )
+
         self.checkpoint_json_name = "training_state.json"
 
-        if self.checkpoint_dir is not None:
-            self._checkpoint_json_path = os.path.join(self.checkpoint_dir, self.checkpoint_json_name)
+        # チェックポイントの読み込み（あれば復元、なければ初期化）
+        self._load_state()
 
-            if os.path.exists(self._checkpoint_json_path):
-                self._load_state()
-                print("load checkpoint dir")
-            else:
-                os.makedirs(self.checkpoint_dir, exist_ok=True)
-                self.log["config"]["num_epochs"] = self.num_epochs
-                self.log["config"]["total_step"] = self.total_step
-                self.log["config"]["log_interval"] = self.log_interval 
-                self.log["config"]["save_every_n_epochs"] = self.save_every_n_epochs
-
-                with open(self._checkpoint_json_path, "w") as f:
-                    json.dump(self.log, f, indent=4)
-
-                if self.accelerator is not None:
-                    self.accelerator.save_state(self.checkpoint_dir)
-                print("init checkpoint dir")
-            
-
-        self._show_training_conig()
-        
-
-        self.log_interval_loss_sum = 0.0
-        self.epoch_loss_sum = 0
-
-        for module in frozen_modules:
-            if hasattr(module, 'eval') and callable(module.eval):
-                module.eval()
-
-        # main progressbar
-        self.progress_bar = tqdm(
-            range(self.total_step), 
-            desc=f"Epoch {self.current_epoch}/{self.num_epochs}",
-            initial=self.current_step
-            )
-
-        # set train mode
+        # モデルを学習モードへ切り替え
         self.train()
 
-        
-    def _show_training_conig(self):
-        print("---------------training config-----------------")
-        print(f"num_epochs:{self.num_epochs}")
-        print(f"total_steps:{self.total_step}")
-        print(f"log_interval:{False if self.log_interval is None else self.log_interval}")
-        print(f"use_checkpoint:{False if self.checkpoint_dir is None else True}")
-        print(f"use_accelerator:{False if self.accelerator is None else True}")
-        print("-----------------------------------------------")
-        
+        # 進捗バーの初期化
+        self.progress_bar = tqdm(
+            range(self.total_step),
+            desc=f"Epoch {self.training_state.epoch}/{self.num_epochs}",
+            initial=self.training_state.step
+        )
+
+    @property
+    def epoch(self):
+        return self.training_state.epoch
+
+    @property
+    def step(self):
+        return self.training_state.step
+
     @property
     def epochs(self):
-        return range(self.current_epoch, self.num_epochs + 1)
+        """途中再開を考慮したエポックのイテレータを返す"""
+        return range(self.training_state.epoch, self.num_epochs + 1)
 
     @property
     def dataloader(self):
-        """現在の進捗に合わせて、済んだバッチをスキップしたDataLoaderを返す (Resume対応)"""
-        steps_done_in_epoch = self.current_step % self.steps_per_epoch
-        
-        # 途中再開なら islice で先頭をスキップ
+        """途中再開（Resume）時に、そのエポックですでに処理済みのバッチをスキップして返す"""
+        steps_done_in_epoch = self.training_state.step % self.steps_per_epoch
         if steps_done_in_epoch > 0:
             return islice(self._raw_dataloader, steps_done_in_epoch, None)
         return self._raw_dataloader
+    
 
     def _load_state(self):
-        json_path = os.path.join(self.checkpoint_dir,self.checkpoint_json_name)
-        with open(json_path, "r") as f:
-            info = json.load(f)
+        """チェックポイントが存在すれば読み込み、状態を復元する"""
+        if self.checkpoint_dir is None:
+            return
 
-            self.log = info
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        json_path = os.path.join(self.checkpoint_dir, self.checkpoint_json_name)
 
-            self.num_epochs = self.log["config"]["num_epochs"]
-            self.total_step = self.log["config"]["total_step"]
-            self.log_interval = self.log["config"]["log_interval"]
-            self.save_every_n_epochs = self.log["config"]["save_every_n_epochs"]
-            self.current_step = self.log["step"]
+        if os.path.exists(json_path):
+            # 1. 独自の進行状況を美しいJSON構造から復元
+            with open(json_path, "r") as f:
+                state = json.load(f)
+                self.training_state.load_state_dict(state)
 
-            self.current_epoch = self.current_step // (self.steps_per_epoch) + 1
-        
-        if self.accelerator is not None:
+            # 2. Acceleratorが管理する重みやオプティマイザの状態を復元
             self.accelerator.load_state(self.checkpoint_dir)
-            
-    
-    def _get_plot_data(self,data:dict[str, float]) -> tuple[list[int], list[float]]:
-        xy = [(int(k),v) for k, v in data.items()]
-        xy.sort()
-        x = [p[0] for p in xy]
-        y = [p[1] for p in xy]
-        return x, y
-    
+            print(f"Loaded checkpoint: Epoch {self.training_state.epoch}, Step {self.training_state.step}")
+        else:
+            print("Initialized new checkpoint directory.")
+
+    def is_savepoint(self) -> bool:
+        if self.training_state.epoch > self.num_epochs: return False # 終了後はFalse
+        if self.training_state.epoch == self.num_epochs:
+            return True
+        if self.save_every_n_epochs is not None and (self.training_state.epoch) % self.save_every_n_epochs == 0:
+            return True
+        return False
+
+
+    def checkpoint(self):
+        """現在のステップとエポック、およびモデルの状態を保存する"""
+        if self.checkpoint_dir is None:
+            return
+
+        # 1. TrainingState が生成する完璧な辞書をそのまま保存
+        json_path = os.path.join(self.checkpoint_dir, self.checkpoint_json_name)
+        with open(json_path, "w") as f:
+            json.dump(self.training_state.state_dict(), f, indent=4)
+
+        # 2. Acceleratorが管理する重みやオプティマイザの状態を保存
+        self.accelerator.save_state(self.checkpoint_dir)
+
+
     def train(self):
         for module in self.trainable_modules:
             if hasattr(module, 'train') and callable(module.train):
                 module.train()
 
-    def eval(self):   
-        for module in self.trainable_modules:
-            if hasattr(module, 'eval') and callable(module.eval):
-                module.eval()
-
-
-    def save_checkpoint(self):
-        if self.checkpoint_dir is None:
-            return
+    def step_end(self, decimals: int = 3, **kwargs):
+        """1ステップ（1バッチ）終了時の処理。kwargsで動的に受け取る"""
         
-        self.log["epoch_loss"][str(self.current_epoch)]=self.get_epoch_loss()
-        self.log["epoch"] = self.current_epoch
-        self.log["step"] = self.current_step
-
-        with open(self._checkpoint_json_path, "w") as f:
-            json.dump(self.log, f, indent=4)
-
-        if self.accelerator is not None:
-            self.accelerator.save_state(self.checkpoint_dir)
-
-
-    def step_end(self, loss, **kwargs) -> None:
-        loss = loss.item() if hasattr(loss, 'item') else loss
-
-        self.epoch_loss_sum += loss
-        self.current_step += 1
-
-        if self.log_interval is not None:
-            self.log_interval_loss_sum += loss
-            if self.current_step % self.log_interval == 0:
-                avg_loss = self.log_interval_loss_sum / self.log_interval
-                #self.log["log"].append({'step': self.current_step, 'loss': avg_loss})
-                self.log["loss_log"][str(self.current_step)] = avg_loss
-                self.log_interval_loss_sum = 0.0
-
+        # TrainingStateにはメトリクス(kwargs)だけを投げる
+        # (引数 decimals は kwargs の中に含まれないので、ノイズとして記録されません)
+        self.training_state.step_end(**kwargs)
+        
         self.progress_bar.update(1)
-        self.progress_bar.set_postfix(loss=f"{loss:.4f}", **kwargs)
-
-
-    def get_epoch_loss(self):
-        current_epoch_steps = self.current_step % self.steps_per_epoch
-        if current_epoch_steps == 0:
-            current_epoch_steps = self.steps_per_epoch
         
-        avg_epoch_loss = self.epoch_loss_sum / current_epoch_steps if current_epoch_steps > 0 else 0
-        return avg_epoch_loss
-
-    def epoch_end(self, **kwargs) -> None:
-        msg = f"Epoch {self.current_epoch}/{self.num_epochs}"
-
-        if kwargs:
-            extra_msg = [f"{k}={v}" for k, v in kwargs.items()]
-            msg += ": " + " | ".join(extra_msg)
-
-        tqdm.write(msg)  
-
-        self.current_epoch += 1 
-        self.epoch_loss_sum = 0
-      
-        if self.current_epoch <= self.num_epochs:
-            self.progress_bar.set_description(f"Epoch {self.current_epoch}/{self.num_epochs}")
-
-        
-    def lr_log(self,lr=None):
-        if lr is not None:
-            self.log["lr_log"][str(self.current_step)] = lr
-
-
-    def is_savepoint(self) -> bool:
-        if self.current_epoch > self.num_epochs: return False # 終了後はFalse
-        if self.current_epoch == self.num_epochs:
-            return True
-        if self.save_every_n_epochs is not None and (self.current_epoch) % self.save_every_n_epochs == 0:
-            return True
-        return False
-
-    def is_validpoint(self) -> bool:
-        if self.valid is None: return False
-        if self.current_epoch > self.num_epochs: return False
-        if self.valid.every_n_epochs is not None: 
-            if self.current_epoch == self.num_epochs:
-                return True
-            if (self.current_epoch) % self.valid.every_n_epochs == 0:
-                return True
-        return False
-
-
-    def plot(self, output_dir=None, file_name: str = None) -> None:
-        # データの存在確認
-        if self.log_interval is None or len(self.log.get("loss_log", [])) == 0:
-            return
-
-        fig = None
-        try:
-            steps, losses = self._get_plot_data(self.log["loss_log"])
-            smooth_losses = pd.Series(losses).ewm(alpha=0.1).mean()
-
-            # オブジェクト指向のインターフェースを使用
-            fig, ax1 = plt.subplots(figsize=(10, 5))
-
-            # Lossの描画
-            ax1.set_xlabel('Steps')
-            ax1.set_ylabel('Loss', color='tab:blue')
-            # 生データはラベルなし、滑らかな線にラベルを付けると凡例が綺麗
-            ax1.plot(steps, losses, color='tab:blue', alpha=0.3)
-            ax1.plot(steps, smooth_losses, color='tab:blue', linewidth=2, label='Training Loss')
-            ax1.tick_params(axis='y', labelcolor='tab:blue')
-            ax1.grid(True)
-
-            # Validation Loss
-            if len(self.log.get("val_log", [])) > 0:
-                v_steps, v_losses = self._get_plot_data(self.log["val_log"])
-                ax1.plot(v_steps, v_losses, label='Validation Loss', marker='o', linestyle='--', color='orange')
-
-            # LRの描画 (右軸)
-            if len(self.log.get("lr_log", [])) > 0:
-                ax2 = ax1.twinx()
-                ax2.set_ylabel('Learning Rate', color='tab:red')
-                lr_steps, lr_values = self._get_plot_data(self.log["lr_log"])
-                ax2.plot(lr_steps, lr_values, label='Learning Rate', linestyle=':', color='tab:red', alpha=0.6)
-                ax2.tick_params(axis='y', labelcolor='tab:red')
-                
-                # 凡例の統合
-                lines1, labels1 = ax1.get_legend_handles_labels()
-                lines2, labels2 = ax2.get_legend_handles_labels()
-                ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
-            else:
-                ax1.legend(loc='upper right')
-
-            ax1.set_title('Training Metrics')
-
-            # パス構築の安全性向上
-            save_name = file_name if file_name else "training_loss"
-            if not save_name.endswith('.png'):
-                save_name += '.png'
-                
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
-                output_path = os.path.join(output_dir, save_name)
-            else:
-                output_path = save_name
-
-            # 保存
-            fig.tight_layout() # レイアウトの重なりを自動調整
-            fig.savefig(output_path)
+        # プログレスバーに表示するための文字列辞書を作成
+        postfix_data = {}
+        for key, value in kwargs.items():
+            # Tensor型の場合は数値に変換
+            val = value.item() if hasattr(value, 'item') else value
             
-        except Exception as e:
-            print(f"Failed to save plot: {e}")
-        finally:
-            # エラーが起きても確実にリソースを解放
-            if fig:
-                plt.close(fig)
+            # 数値型であれば指定の桁数でフォーマット、それ以外の型(文字列など)はそのまま
+            if isinstance(val, (float, int)):
+                postfix_data[key] = f"{val:.{decimals}f}"
+            else:
+                postfix_data[key] = val
+                
+        # 辞書を展開(unpack)して tqdm の set_postfix に渡す
+        self.progress_bar.set_postfix(**postfix_data)
 
+    def epoch_end(self):
+        """1エポック終了時の処理"""
+        metrics = self.training_state.get_current_state()
+        
+        metrics_str = " | ".join([f"{k}: {v:.3f}" for k, v in metrics.items()])
+        
+        tqdm.write(f"Epoch {self.training_state.epoch}/{self.num_epochs} : {metrics_str}")
+        
+        self.training_state.epoch_end()
+        
+        # 5. 次のエポックへプログレスバーの表示を更新
+        if self.training_state.epoch <= self.num_epochs:
+            self.progress_bar.set_description(f"Epoch {self.training_state.epoch}/{self.num_epochs}")
+
+    def plot(self, output_name: str = "all.png"):
+        plotter = MetricsPlotter(self.training_state, self.plot_dir)
+        plotter.plot_all(filename=output_name)
 
