@@ -261,7 +261,7 @@ class TrainingManager:
         self.total_step = self.steps_per_epoch * self.num_epochs
 
         MAX_EPOCH_PER_LOG = 500
-        logs_per_epoch = min(logs_per_epoch, MAX_EPOCH_PER_LOG))
+        logs_per_epoch = min(logs_per_epoch, MAX_EPOCH_PER_LOG)
         
         if self.steps_per_epoch <= logs_per_epoch:
             # エポック当たりのlogを取る回数よりもエポックのステップの方が少ない場合、各ステップでlogを取る
