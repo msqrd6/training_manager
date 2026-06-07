@@ -23,107 +23,7 @@ def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
                     trainable_params.append(param)
         return trainable_params
 
-class MetricsPlotter:
-    """TrainingStateの履歴(step_history)から汎用的でクリアなグラフを描画・保存するクラス"""
-    
-    def __init__(self, state, output_dir: str = "./plots"):
-        self.state = state
-        self.output_dir = output_dir
-        
-        # 出力先ディレクトリが存在しない場合は作成
-        os.makedirs(self.output_dir, exist_ok=True)
 
-        # 汎用的なカラーパレット (Matplotlib標準のtab10に準拠)
-        self.colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple', 'tab:brown']
-
-    def _get_step_plot_data(self, data_dict: dict) -> tuple[list[int], list[float]]:
-        """ステップ単位の辞書データから横軸(X)と縦軸(Y)を生成する専用メソッド"""
-        xy = [(int(k), float(v)) for k, v in data_dict.items()]
-        xy.sort(key=lambda x: x[0])
-        return [p[0] for p in xy], [p[1] for p in xy]
-
-    def _apply_k_formatting(self, ax, xlabel: str):
-        """X軸がStepsのときだけ、数値を 'k' 表記(1000 -> 1k)にする内部メソッド"""
-        if xlabel == "Steps":
-            formatter = ticker.FuncFormatter(lambda x, pos: f"{x/1000:g}k" if x >= 1000 else f"{x:g}")
-            ax.xaxis.set_major_formatter(formatter)
-
-    def _apply_standard_styling(self, ax, title: str, xlabel: str):
-        """グラフ全体に汎用的でクリアなスタイリングを適用する内部メソッド"""
-        ax.grid(True, linestyle='--', alpha=0.7)
-        ax.set_axisbelow(True)
-
-        ax.set_xlabel(xlabel, fontsize=11)
-        ax.set_ylabel("Value", fontsize=11)
-        ax.set_title(title, fontsize=13, pad=15)
-
-        ax.legend(loc='upper right', framealpha=0.9)
-        self._apply_k_formatting(ax, xlabel)
-
-    # =========================================================
-    # プロット関数群
-    # =========================================================
-    def plot(self, filename: str = "all_metrics.png"):
-        """全メトリクスの平滑化されたデータのみを1つのグラフにまとめて描画する"""
-        if not self.state.step_history: 
-            return
-        
-        fig, ax = plt.subplots(figsize=(10, 5))
-        
-        for i, (metric_name, data_dict) in enumerate(self.state.step_history.items()):
-            if not data_dict: 
-                continue
-            
-            x_steps, y_values = self._get_step_plot_data(data_dict)
-            color = self.colors[i % len(self.colors)]
-            
-            # 平滑化データのみを描画
-            smoothed_values = pd.Series(y_values).ewm(alpha=0.05).mean()
-            ax.plot(x_steps, smoothed_values, color=color, linewidth=2.0, label=f"{metric_name} (Smoothed)")
-            
-        self._apply_standard_styling(ax, "Training Metrics (Smoothed)", "Steps")
-        
-        filepath = os.path.join(self.output_dir, filename)
-        fig.tight_layout()
-        fig.savefig(filepath, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-
-
-    def plot_individual(self, metric_name: str, filename: str = None):
-        """指定した指標の生データと平滑化データを重ねて描画する"""
-        if metric_name not in self.state.step_history or not self.state.step_history[metric_name]: 
-            return
-        
-        x_steps, y_values = self._get_step_plot_data(self.state.step_history[metric_name])
-        
-        fig, ax = plt.subplots(figsize=(8, 5))
-        
-        # 1. 生データ（薄い青、細い線）
-        ax.plot(x_steps, y_values, color='tab:blue', alpha=0.3, linewidth=1.0, label=f'{metric_name} (Raw)')
-        
-        # 2. 平滑化データ（濃い青、太い線）
-        smoothed_values = pd.Series(y_values).ewm(alpha=0.05).mean()
-        ax.plot(x_steps, smoothed_values, color='tab:blue', linewidth=2.0, label=f'{metric_name} (Smoothed)')
-        
-        self._apply_standard_styling(ax, f"{metric_name.capitalize()}", "Steps")
-        
-        if filename is None: 
-            filename = f"{metric_name}.png"
-            
-        filepath = os.path.join(self.output_dir, filename)
-        fig.tight_layout()
-        fig.savefig(filepath, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-
-
-    def plot_all(self,filename="all.png"):
-        """記録されているすべてのメトリクスについて、plot_individualを一括実行する"""
-        if not self.state.step_history: 
-            return
-        
-        self.plot(filename=filename)
-        for metric_name in self.state.step_history.keys():
-            self.plot_individual(metric_name)
 
 class TrainingState:
     def __init__(self, **config_kwargs):
@@ -132,7 +32,7 @@ class TrainingState:
         
         self.epoch = 1
         self.step = 0
-        self.history = defaultdict(dict)
+        self.epoch_history = defaultdict(dict)
         self.step_history = defaultdict(dict)
         self._running_state = defaultdict(lambda: {"sum": 0.0, "count": 0})
 
@@ -150,7 +50,7 @@ class TrainingState:
     def epoch_end(self):
         for key, data in self._running_state.items():
             avg_value = data["sum"] / data["count"] if data["count"] > 0 else 0.0
-            self.history[f"epoch_{key}"][self.epoch] = avg_value
+            self.epoch_history[f"epoch_{key}"][self.epoch] = avg_value
         
         self._running_state.clear()
         self.epoch += 1
@@ -174,16 +74,16 @@ class TrainingState:
         return {
             "config": self.config,
             "running_state": running_state_dict,
-            "history": {k: dict(v) for k, v in self.history.items()},
+            "epoch_history": {k: dict(v) for k, v in self.epoch_history.items()},
             "step_history": {k: dict(v) for k, v in self.step_history.items()},
         }
 
     def load_state_dict(self, state: Dict[str, Any]):
         self.config = state.get("config", {})
         
-        self.history.clear()
+        self.epoch_history.clear()
         for k, v in state.get("history", {}).items():
-            self.history[k].update(v)
+            self.epoch_history[k].update(v)
 
         # 💡 修正箇所: JSONからstep_historyを復元する
         self.step_history.clear()
@@ -199,6 +99,139 @@ class TrainingState:
             if k not in ["epoch", "step"]:
                 self._running_state[k].update(v)
 
+class Plotter:
+    """TrainingStateの履歴(step_history)から汎用的でクリアなグラフを描画・保存するクラス"""
+    def __init__(self, state, output_dir: str = "./plots", **custom_styles):
+        self.state = state
+        self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # =========================================================
+        # 💡 ここでデザインを一元管理！ (外から上書き可能)
+        # =========================================================
+        self.style = {
+            "title" : "Training Loss",
+            "xlabel": "steps",
+
+            # 色
+            'colors': ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple', 'tab:brown'],
+            
+            # 線の設定
+            'raw_linewidth': 1.0,      # 生データの線の太さ
+            'raw_alpha': 0.3,          # 生データの透明度
+            'smooth_linewidth': 1.2,   # 平滑化データの線の太さ
+            'smooth_factor': 0.1,      # 平滑化の強さ (0.1にすると少しトレンドに敏感になる)
+            
+            # 全体の設定
+            'grid_style': '--',        # グリッドの線種
+            'grid_alpha': 0.8,         # グリッドの透明度
+            'title_size': 12,          # タイトルの文字サイズ
+            'label_size': 10,          # 軸ラベル(X軸/Y軸の名前)の文字サイズ
+            
+            #軸の目盛り(Tick)の設定
+            'tick_label_size': 9,      # 目盛りの数字のサイズ
+            'tick_color': "#181818",   # 目盛りの色
+            
+            # 枠線（Spine）の設定
+            'spine_width': 0.4,        # 枠線の太さ
+            'spine_color': "#313131"
+        }
+        
+        self.style.update(custom_styles)
+
+    # =========================================================
+    # スタイル適用メソッド
+    # =========================================================
+    def _plot_raw_data(self, ax, x, y, label, color='tab:blue'):
+        ax.plot(x, y, color=color, 
+                alpha=self.style['raw_alpha'], 
+                linewidth=self.style['raw_linewidth'])
+
+    def _plot_smoothed_data(self, ax, x, y, label, color='tab:blue'):
+        smoothed_values = pd.Series(y).ewm(alpha=self.style['smooth_factor']).mean()
+        ax.plot(x, smoothed_values, color=color, 
+                linewidth=self.style['smooth_linewidth'], 
+                label=label)
+
+    def _apply_k_formatting(self, ax, xlabel: str):
+        formatter = ticker.FuncFormatter(lambda x, pos: f"{x/1000:g}k" if x >= 1000 else f"{x:g}")
+        ax.xaxis.set_major_formatter(formatter)
+
+    def _apply_standard_styling(self, ax, title: str, xlabel: str):
+        ax.grid(True, linestyle=self.style['grid_style'], alpha=self.style['grid_alpha'])
+        ax.set_axisbelow(True)
+        
+        ax.set_xlabel(xlabel, fontsize=self.style['label_size'])
+        ax.set_ylabel("loss", fontsize=self.style['label_size'])
+        ax.set_title(title, fontsize=self.style['title_size'])
+        ax.legend(loc='upper right', framealpha=0.9)
+        
+        for spine in ax.spines.values():
+            spine.set_linewidth(self.style['spine_width'])
+            spine.set_color(self.style['spine_color'])
+
+        # 💡 追加: 目盛り(Tick)のスタイルを一括適用
+        ax.tick_params(
+            axis='both', 
+            labelsize=self.style['tick_label_size'], 
+            colors=self.style['tick_color']
+        )
+
+        self._apply_k_formatting(ax, xlabel)
+
+    # =========================================================
+    # データ取得ヘルパー
+    # =========================================================
+    def _get_step_plot_data(self, data_dict: dict) -> tuple[list[int], list[float]]:
+        xy = [(int(k), float(v)) for k, v in data_dict.items()]
+        xy.sort(key=lambda x: x[0])
+        return [p[0] for p in xy], [p[1] for p in xy]
+
+    # =========================================================
+    # プロット実行関数群
+    # =========================================================
+    def plot(self, filename: str = "all_metrics.png"):
+        if not self.state.step_history: return
+        fig, ax = plt.subplots(figsize=(10, 5))
+        
+        for i, (metric_name, data_dict) in enumerate(self.state.step_history.items()):
+            if not data_dict: continue
+            x_steps, y_values = self._get_step_plot_data(data_dict)
+            color = self.style['colors'][i % len(self.style['colors'])]
+            
+            self._plot_smoothed_data(ax, x_steps, y_values, label=metric_name, color=color)
+            
+        self._apply_standard_styling(ax, self.style['title'], self.style['xlabel'])
+        
+        filepath = os.path.join(self.output_dir, filename)
+        fig.tight_layout()
+        fig.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+
+    def plot_individual(self, metric_name: str, filename: str = None):
+        if metric_name not in self.state.step_history or not self.state.step_history[metric_name]: return
+        x_steps, y_values = self._get_step_plot_data(self.state.step_history[metric_name])
+        fig, ax = plt.subplots(figsize=(10, 5))
+        
+        self._plot_raw_data(ax, x_steps, y_values, label=metric_name, color='tab:blue')
+        self._plot_smoothed_data(ax, x_steps, y_values, label=metric_name, color='tab:blue')
+        
+        self._apply_standard_styling(ax,self.style['title'], self.style['xlabel'])
+        ax.set_ylabel(metric_name.capitalize(), fontsize=self.style['label_size'])
+        
+        if filename is None: filename = f"{metric_name}.png"
+        filepath = os.path.join(self.output_dir, filename)
+        fig.tight_layout()
+        fig.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+
+    def plot_all(self, filename="all.png"):
+        if not self.state.step_history: return
+        self.plot(filename=filename)
+        for metric_name in self.state.step_history.keys():
+            self.plot_individual(metric_name)
+
+
 class TrainingManager:
     """
     Acceleratorを用いた学習ループの進行と、
@@ -211,7 +244,8 @@ class TrainingManager:
                  accelerator: Accelerator,
                  output_dir: str,
                  save_every_n_epochs: int = None,
-                 step_log_interval: int = 10,
+                 logs_per_epoch: int = 10,
+                 checkpoint = True,
                  ):
         
         self.trainable_modules = trainable_modules
@@ -220,11 +254,22 @@ class TrainingManager:
         self.accelerator = accelerator
         self.save_every_n_epochs = save_every_n_epochs
         self.output_dir = Path(output_dir)
-        self.checkpoint_dir = self.output_dir / "checkpoints"
+        self.checkpoint_dir = self.output_dir / "checkpoints" if checkpoint else None
         self.plot_dir = self.output_dir / "plots"
 
         self.steps_per_epoch = len(self._raw_dataloader)
         self.total_step = self.steps_per_epoch * self.num_epochs
+
+        MAX_EPOCH_PER_LOG = 500
+        logs_per_epoch = min(logs_per_epoch, MAX_EPOCH_PER_LOG))
+        
+        if self.steps_per_epoch <= logs_per_epoch:
+            # エポック当たりのlogを取る回数よりもエポックのステップの方が少ない場合、各ステップでlogを取る
+            step_log_interval = 1
+        else:
+            step_log_interval = max(1,self.steps_per_epoch // logs_per_epoch)
+
+        print(step_log_interval)
 
         self.training_state = TrainingState(
             num_epochs=self.num_epochs, 
@@ -234,19 +279,19 @@ class TrainingManager:
         )
 
         self.checkpoint_json_name = "training_state.json"
+        self.is_finished = False
 
-        # チェックポイントの読み込み（あれば復元、なければ初期化）
         self._load_state()
 
-        # モデルを学習モードへ切り替え
-        self.train()
-
-        # 進捗バーの初期化
-        self.progress_bar = tqdm(
-            range(self.total_step),
-            desc=f"Epoch {self.training_state.epoch}/{self.num_epochs}",
-            initial=self.training_state.step
-        )
+        if not self.is_finished:
+            self.train()
+            self.progress_bar = tqdm(
+                range(self.total_step),
+                desc=f"Epoch {self.training_state.epoch}/{self.num_epochs}",
+                initial=self.training_state.step
+            )
+        else:
+            self.progress_bar = None
 
     @property
     def epoch(self):
@@ -269,7 +314,7 @@ class TrainingManager:
             return islice(self._raw_dataloader, steps_done_in_epoch, None)
         return self._raw_dataloader
     
-
+    
     def _load_state(self):
         """チェックポイントが存在すれば読み込み、状態を復元する"""
         if self.checkpoint_dir is None:
@@ -289,6 +334,11 @@ class TrainingManager:
             print(f"Loaded checkpoint: Epoch {self.training_state.epoch}, Step {self.training_state.step}")
         else:
             print("Initialized new checkpoint directory.")
+
+        if self.training_state.epoch > self.num_epochs:
+            self.is_finished = True
+            print("Training is already finished.")
+            
 
     def is_savepoint(self) -> bool:
         if self.training_state.epoch > self.num_epochs: return False # 終了後はFalse
@@ -357,6 +407,5 @@ class TrainingManager:
             self.progress_bar.set_description(f"Epoch {self.training_state.epoch}/{self.num_epochs}")
 
     def plot(self, output_name: str = "all.png"):
-        plotter = MetricsPlotter(self.training_state, self.plot_dir)
+        plotter = Plotter(self.training_state, self.plot_dir)
         plotter.plot_all(filename=output_name)
-

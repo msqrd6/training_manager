@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader, Dataset
 from accelerate import Accelerator
 
 # 作成した最新のクラス群をインポート
-from trmn.training_manager import TrainingManager, MetricsPlotter
+from trmn.training_manager import TrainingManager
 
 class MyDataset(Dataset):
     def __init__(self, repeat):
@@ -28,7 +28,7 @@ def main():
     accelerator = Accelerator()
     
     batch_size = 1
-    repeat = 1
+    repeat = 10
     lr = 1e-1
 
     model = torch.nn.Sequential(torch.nn.Linear(10, 10))
@@ -50,7 +50,7 @@ def main():
     )
 
     def forward_process(data, current_epoch):
-        time.sleep(0.01) # テスト実行が早くなるよう少し短縮しています
+        time.sleep(0.001) # テスト実行が早くなるよう少し短縮しています
         # エポックが進むごとにLossが下がるようにシミュレート
         loss = (random.random() * 10) / current_epoch
         return loss
@@ -63,7 +63,7 @@ def main():
         # 途中再開時は済んだバッチを自動スキップしてくれる tm.dataloader を使用
         for data in tm.dataloader:
             loss = forward_process(data, epoch)
-            
+
             # --- 実際の学習処理 ---
             # accelerator.backward(loss)
             # optimizer.step()
@@ -81,9 +81,10 @@ def main():
             # save_model(model)
             pass
         
-        # 💡 チェックポイントの保存
-        tm.checkpoint()
         tm.plot()
+
+
+       
 
 
 if __name__ == "__main__":
