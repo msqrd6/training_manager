@@ -35,7 +35,7 @@ tm = TrainingManager(
     accelerator=accelerator,
     output_dir='./output',       # チェックポイントやプロットの保存先
     save_every_n_epochs=2,       # チェックポイントの保存間隔 (省略時は最終エポックのみ)
-    step_log_interval=10,        # 損失ログの記録ステップ間隔
+    logs_per_epoch=10,        # 損失ログの記録ステップ間隔
 )
 
 # 学習ループ

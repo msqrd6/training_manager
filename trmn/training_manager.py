@@ -3,7 +3,6 @@ import json
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from itertools import islice
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from pathlib import Path
@@ -81,7 +80,7 @@ class TrainingState:
         self.config = state.get("config", {})
         
         self.epoch_history.clear()
-        for k, v in state.get("history", {}).items():
+        for k, v in state.get("epoch_history", {}).items():
             self.epoch_history[k].update(v)
 
         # 💡 修正箇所: JSONからstep_historyを復元する
@@ -308,9 +307,10 @@ class TrainingManager:
     @property
     def dataloader(self):
         """途中再開（Resume）時に、そのエポックですでに処理済みのバッチをスキップして返す"""
-        steps_done_in_epoch = self.training_state.step % self.steps_per_epoch
+        # 現在のエポックで既に完了しているステップ数を厳密に計算
+        steps_done_in_epoch = self.training_state.step - (self.training_state.epoch - 1) * self.steps_per_epoch
         if steps_done_in_epoch > 0:
-            return islice(self._raw_dataloader, steps_done_in_epoch, None)
+            return self.accelerator.skip_first_batches(self._raw_dataloader, num_batches=steps_done_in_epoch)
         return self._raw_dataloader
     
     
