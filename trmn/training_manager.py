@@ -24,7 +24,6 @@ def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
         return trainable_params
 
 
-
 class TrainingState:
     def __init__(self, **config_kwargs):
         self.config = config_kwargs
