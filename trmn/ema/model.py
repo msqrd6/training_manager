@@ -53,5 +53,5 @@ class EMAModule(nn.Module):
         return self.ema_model.load_state_dict(state_dict, strict=strict)
     
     def save_pretrained(self, save_directory):
-        save_file(self.ema_model.state_dict(), save_directory)
+        save_file(self.ema_model.state_dict(), save_directory+"/ema_model.safetensors")
 
