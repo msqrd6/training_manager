@@ -1,6 +1,8 @@
 import copy
 import torch
 import torch.nn as nn
+from safetensors.torch import save_file
+
 
 def decay_scheduler(current_step, max_decay=0.999):
     return min(max_decay, (1.0 + current_step) / (10.0 + current_step))
@@ -49,3 +51,7 @@ class EMAModule(nn.Module):
         読み込み時も同様に、中の ema_model に直接流し込む
         """
         return self.ema_model.load_state_dict(state_dict, strict=strict)
+    
+    def save_pretrained(self, save_directory):
+        save_file(self.ema_model.state_dict(), save_directory)
+
