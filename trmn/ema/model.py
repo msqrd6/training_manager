@@ -20,7 +20,7 @@ class EMAModule(nn.Module):
         # 3. Dropoutなどが誤作動しないよう、常に評価(推論)モードにしておく
         self.ema_model.eval()
 
-    def update(self, model, decay=None):
+    def step(self, model, decay=None):
         """学習用モデルからEMA値を更新"""
         decay = decay if decay is not None else self.decay
 

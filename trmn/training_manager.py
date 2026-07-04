@@ -14,6 +14,9 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import pandas as pd
 
+from trmn.ema.model import EMAModule,decay_scheduler
+
+
 def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
         trainable_params = []
         for module in trainable_modules:
@@ -21,7 +24,6 @@ def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
                 if param.requires_grad:
                     trainable_params.append(param)
         return trainable_params
-
 
 class TrainingState:
     def __init__(self, **config_kwargs):
@@ -244,6 +246,7 @@ class TrainingManager:
                  save_every_n_epochs: int = None,
                  logs_per_epoch: int = 10,
                  checkpoint = True,
+                 ema_model: nn.Module = None,
                  ):
         
         self.trainable_modules = trainable_modules
@@ -267,8 +270,6 @@ class TrainingManager:
         else:
             step_log_interval = max(1,self.steps_per_epoch // logs_per_epoch)
 
-        print(step_log_interval)
-
         self.training_state = TrainingState(
             num_epochs=self.num_epochs, 
             total_steps=self.total_step,
@@ -290,6 +291,11 @@ class TrainingManager:
             )
         else:
             self.progress_bar = None
+
+        if ema_model is not None:
+            ema_model = accelerator.prepare(ema_model)
+            self.ema_model = ema_model
+            self.ema = EMAModule(ema_model)
 
     @property
     def epoch(self):
@@ -366,6 +372,11 @@ class TrainingManager:
         for module in self.trainable_modules:
             if hasattr(module, 'train') and callable(module.train):
                 module.train()
+
+
+    def ema_step(self):
+        if self.accelerator.sync_gradients:
+            self.ema.step(self.accelerator.unwrap_model(self.ema_model),decay=decay_scheduler(self.step))
 
     def step_end(self, decimals: int = 3, **kwargs):
         """1ステップ（1バッチ）終了時の処理。kwargsで動的に受け取る"""
