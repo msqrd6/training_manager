@@ -6,6 +6,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from pathlib import Path
+from safetensors.torch import save_model
 
 from collections import defaultdict
 from typing import Any, Dict
@@ -14,7 +15,6 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import pandas as pd
 
-from trmn.ema.model import EMAModule,decay_scheduler
 
 
 def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
@@ -24,6 +24,8 @@ def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
                 if param.requires_grad:
                     trainable_params.append(param)
         return trainable_params
+
+
 
 class TrainingState:
     def __init__(self, **config_kwargs):
@@ -246,7 +248,6 @@ class TrainingManager:
                  save_every_n_epochs: int = None,
                  logs_per_epoch: int = 10,
                  checkpoint = True,
-                 ema_model: nn.Module = None,
                  ):
         
         self.trainable_modules = trainable_modules
@@ -292,10 +293,6 @@ class TrainingManager:
         else:
             self.progress_bar = None
 
-        if ema_model is not None:
-            ema_model = accelerator.prepare(ema_model)
-            self.ema_model = ema_model
-            self.ema = EMAModule(ema_model)
 
     @property
     def epoch(self):
@@ -368,15 +365,23 @@ class TrainingManager:
         self.accelerator.save_state(self.checkpoint_dir)
 
 
+    def save_models(self, save_dir_name="save_model"):
+        self.accelerator.wait_for_everyone()
+        if self.accelerator.is_main_process:
+            save_path = self.output_dir / save_dir_name
+            save_path.mkdir(parents=True, exist_ok=True)
+
+            for i, modules in enumerate(self.trainable_modules):
+                unwrap_model = self.accelerator.unwrap_model(modules)
+                save_model(unwrap_model, save_path / f"{i:03d}.safetensors")
+
+        self.accelerator.wait_for_everyone()
+    
+
     def train(self):
         for module in self.trainable_modules:
             if hasattr(module, 'train') and callable(module.train):
                 module.train()
-
-
-    def ema_step(self):
-        if self.accelerator.sync_gradients:
-            self.ema.step(self.accelerator.unwrap_model(self.ema_model),decay=decay_scheduler(self.step))
 
     def step_end(self, decimals: int = 3, **kwargs):
         """1ステップ（1バッチ）終了時の処理。kwargsで動的に受け取る"""
@@ -384,7 +389,7 @@ class TrainingManager:
         # TrainingStateにはメトリクス(kwargs)だけを投げる
         # (引数 decimals は kwargs の中に含まれないので、ノイズとして記録されません)
         self.training_state.step_end(**kwargs)
-        
+
         self.progress_bar.update(1)
         
         # プログレスバーに表示するための文字列辞書を作成
