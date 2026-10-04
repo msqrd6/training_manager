@@ -75,6 +75,23 @@ class EMAModule(nn.Module):
         """
         return self.ema_model.load_state_dict(state_dict, strict=strict)
     
-    def save_pretrained(self, save_directory, save_name="ema_model"):
-        save_file(self.ema_model.state_dict(), save_directory+f"/{save_name}.safetensors")
+    def save_pretrained(self, save_directory, sub_dir=None, save_name="ema_model"):
+        import os
+        if sub_dir is not None:
+            save_directory = os.path.join(save_directory, sub_dir)
+        os.makedirs(save_directory, exist_ok=True)
+        path = os.path.join(save_directory, f"{save_name}.safetensors")
+        save_file(self.ema_model.state_dict(), path)
+
+    def load_pretrained(self, load_directory, sub_dir=None, load_name="ema_model"):
+        import os
+        from safetensors.torch import load_file
+        if sub_dir is not None:
+            load_directory = os.path.join(load_directory, sub_dir)
+        path = os.path.join(load_directory, f"{load_name}.safetensors")
+        if os.path.exists(path):
+            state_dict = load_file(path)
+            self.load_state_dict(state_dict)
+        else:
+            print(f"Warning: EMA checkpoint not found at {path}")
 

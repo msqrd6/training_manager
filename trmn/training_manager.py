@@ -4,9 +4,9 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from accelerate import Accelerator
 from pathlib import Path
 from safetensors.torch import save_model
+from accelerate import Accelerator
 
 from collections import defaultdict
 from typing import Any, Dict
@@ -15,8 +15,6 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import pandas as pd
 
-
-
 def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
         trainable_params = []
         for module in trainable_modules:
@@ -24,7 +22,6 @@ def get_trainable_params(*trainable_modules:nn.Module) -> list[torch.Tensor]:
                 if param.requires_grad:
                     trainable_params.append(param)
         return trainable_params
-
 
 
 class TrainingState:
@@ -306,6 +303,21 @@ class TrainingManager:
     def epochs(self):
         """途中再開を考慮したエポックのイテレータを返す"""
         return range(self.training_state.epoch, self.num_epochs + 1)
+
+    import contextlib
+    @contextlib.contextmanager
+    def unwrapped(self, *models):
+        """
+        withブロック内だけで一時的にアンラップされた生のモデル（リスト）を返すコンテキストマネージャー。
+        例:
+            with tm.unwrapped(model1, model2) as (raw1, raw2):
+                raw1.save_pretrained(...)
+        """
+        unwrapped_models = tuple(self.accelerator.unwrap_model(m) for m in models)
+        if len(unwrapped_models) == 1:
+            yield unwrapped_models[0]
+        else:
+            yield unwrapped_models
 
     @property
     def dataloader(self):

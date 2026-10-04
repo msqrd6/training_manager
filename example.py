@@ -8,6 +8,7 @@ from accelerate import Accelerator
 # 作成した最新のクラス群をインポート
 from trmn.training_manager import TrainingManager
 from trmn.config_mixin import ConfigMixin, register_config
+from trmn.ema import EMAModule
 
 class MyDataset(Dataset):
     def __init__(self, repeat):
@@ -28,7 +29,6 @@ class Model(torch.nn.Module, ConfigMixin):
     @register_config
     def __init__(self, hidden_dim=32):
         super().__init__()
-        # use_ema=True(デフォルト)により、初期化完了後に自動で self.ema が作られます
         self.layer = torch.nn.Sequential(
             torch.nn.Linear(10, hidden_dim),
             torch.nn.ReLU(),
@@ -50,17 +50,20 @@ def main():
     lr = 1e-1
 
     # =========================================================
-    # 🌟 モデルの初期化 (学習時なので use_ema=True を指定)
+    # 🌟 モデルとEMAの完全分離による初期化
     # =========================================================
-    model = Model(hidden_dim=32, use_ema=True)
-    print(f"✨ 自動生成されたEMAモデル: {getattr(model, 'ema', None)}")
+    model = Model(hidden_dim=32)
+    
+    # モデル構造とは完全に別枠としてEMAを管理する
+    ema = EMAModule(model, decay=0.999)
+    print(f"✨ EMAモデルを初期化しました（モデル本体からは独立しています）")
     
     dataset = MyDataset(repeat=repeat)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
     model, dataloader = accelerator.prepare(model, dataloader)
 
-    # 💡 新しいManagerの初期化
+    # 💡 Managerの初期化
     tm = TrainingManager(
         trainable_modules=[model],
         dataloader=dataloader,
@@ -82,7 +85,7 @@ def main():
         return loss
     
     # =========================================================
-    # 💡 大幅にシンプルになったトレーニングループ
+    # 💡 トレーニングループ
     # =========================================================
     for epoch in tm.epochs:
         
@@ -95,13 +98,11 @@ def main():
             # optimizer.step()
             # lr_scheduler.step()
             # optimizer.zero_grad()
+            
             # =========================================================
-            # 🌟 学習ステップの終わりにEMAを更新
+            # 🌟 学習ステップの終わりに個別にEMAを更新
             # =========================================================
-            unwrapped_model = accelerator.unwrap_model(model)
-            if hasattr(unwrapped_model, "ema"):
-                # TrainingManager が管理している正確なステップ数を渡す
-                unwrapped_model.ema.step(tm.step)
+            ema.step(current_step=tm.step)
             
             # 💡 動的ロギング（lossやlrなど記録したいものを何でも渡すだけ）
             tm.step_end(decimals=3, loss=loss, learning_rate=lr)
@@ -114,14 +115,14 @@ def main():
         # =========================================================
         if tm.is_savepoint():
             save_path = os.path.join(output_dir, f"epoch_{epoch}")
-            unwrapped_model = accelerator.unwrap_model(model)
             
-            # 1. モデルの重みと設定(config.json)を保存
-            unwrapped_model.save_pretrained(save_path)
+            # 💡 提案いただいた機能: withブロックで一瞬だけアンラップ！
+            with tm.unwrapped(model) as raw_model:
+                # 1. モデル本体の重みと設定(config.json)を保存（クリーンな状態）
+                raw_model.save_pretrained(save_path)
             
-            # 2. EMAモデルの重みも保存
-            if hasattr(unwrapped_model, "ema"):
-                unwrapped_model.ema.save_pretrained(save_path, save_name="ema_model")
+            # 2. EMAモデルの重みも独立して保存
+            ema.save_pretrained(save_path, save_name="ema_model")
             
             print(f"✅ 保存完了: {save_path}")
         
