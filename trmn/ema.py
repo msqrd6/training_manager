@@ -58,9 +58,9 @@ class EMAModule(nn.Module):
                 if param.requires_grad:
                     if name in ema_params:
                         ema_param = ema_params[name]
-                        # 指数移動平均の計算
+                        # 指数移動平均の計算 (デバイスの違いを吸収して計算)
                         ema_param.copy_(
-                            current_decay * ema_param + (1.0 - current_decay) * param.data
+                            current_decay * ema_param + (1.0 - current_decay) * param.data.to(ema_param.device)
                         )
 
     def state_dict(self, *args, **kwargs):
