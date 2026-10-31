@@ -5,10 +5,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from accelerate import Accelerator
 
-# 作成した最新のクラス群をインポート
-from trmn.training_manager import TrainingManager
-from trmn.config_mixin import ConfigMixin, register_config
-from trmn.ema import EMAModule
+from trmn import TrainingManager, ConfigMixin, register_config
 
 class MyDataset(Dataset):
     def __init__(self, repeat):
@@ -39,94 +36,92 @@ class Model(torch.nn.Module, ConfigMixin):
         return self.layer(x)
 
 def main():
-    num_epochs = 5
-    output_dir = "trmn/output"
+    num_epochs = 3
+    output_dir = "trmn/_output"
     os.makedirs(output_dir, exist_ok=True)
 
     accelerator = Accelerator()
     
-    batch_size = 1
-    repeat = 10
-    lr = 1e-1
+    batch_size = 4
+    repeat = 5
 
-    # =========================================================
-    # 🌟 モデルとEMAの完全分離による初期化
-    # =========================================================
+    # 1. モデルとデータローダーの準備
     model = Model(hidden_dim=32)
-    
-    # モデル構造とは完全に別枠としてEMAを管理する
-    ema = EMAModule(model, decay=0.999)
-    print(f"✨ EMAモデルを初期化しました（モデル本体からは独立しています）")
-    
     dataset = MyDataset(repeat=repeat)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
     model, dataloader = accelerator.prepare(model, dataloader)
 
-    # 💡 Managerの初期化
+    # =========================================================
+    # 💡 TrainingManagerの初期化
+    # - ema=True: 自動でEMAを作成し、GPUへ配置
+    # - 単一モデルは自動で 'model' フォルダに保存 ({"model": model} の辞書指定も可能)
+    # - save_every_n_epochs=None: 常に最新1件を上書き保存
+    #   (数値を指定すると checkpoints/epoch_001/model/... のように履歴保存)
+    # =========================================================
     tm = TrainingManager(
-        trainable_modules=[model],
+        trainable_modules={"model":model},
         dataloader=dataloader,
         num_epochs=num_epochs,
         accelerator=accelerator,
         output_dir=output_dir,
-        save_every_n_epochs=1,
+        save_every_n_epochs=None,  # 常に最新の1件（checkpoints/model/）を上書き
+        ema=True,                  # EMAモデルの自動管理を有効化
     )
 
     def forward_process(data, current_epoch):
         time.sleep(0.001)
-        
-        # 実際の学習を模した順伝播とロス計算
         out = model(data)
-        
-        # エポックが進むごとにLossが下がるようにシミュレート
         fake_loss_val = (random.random() * 10) / current_epoch
-        loss = out.mean() * 0.0 + fake_loss_val  # 勾配グラフを維持しつつダミーロス
+        loss = out.mean() * 0.0 + fake_loss_val
         return loss
-    
+
     # =========================================================
     # 💡 トレーニングループ
     # =========================================================
     for epoch in tm.epochs:
         
-        # 途中再開時は済んだバッチを自動スキップしてくれる tm.dataloader を使用
+        # 途中再開時は完了済みバッチを自動スキップ
         for data in tm.dataloader:
-            loss = forward_process(data, epoch)
+            # 💡 tm.accumulate() で勾配蓄積と autocast を自動適用
+            with tm.accumulate():
+                loss = forward_process(data, epoch)
 
             # --- 実際の学習処理 ---
-            # accelerator.backward(loss)
-            # optimizer.step()
-            # lr_scheduler.step()
-            # optimizer.zero_grad()
+            # tm.backward(loss)
+            # if tm.sync_gradients: 
+            #     optimizer.step()
+            #     optimizer.zero_grad()
             
-            # =========================================================
-            # 🌟 学習ステップの終わりに個別にEMAを更新
-            # =========================================================
-            ema.step(current_step=tm.step)
-            
-            # 💡 動的ロギング（lossやlrなど記録したいものを何でも渡すだけ）
-            tm.step_end(decimals=3, loss=loss, learning_rate=lr)
+            # 💡 メトリクス記録 + プログレスバー更新 + EMAの自動ステップ更新
+            tm.step_end(decimals=3, loss=loss)
 
-        # 💡 エポック終了時の処理（自動で平均化・1行ログ出力）
+            # 💡 (任意) 巨大データセット等でエポック途中にクラッシュ対策したい場合
+            # if tm.step % 500 == 0:
+            #     tm.save_training_state()
+
+        # 💡 エポック終了処理
+        # - ログ出力
+        # - _training_state/ への再開用自動上書き保存（クラッシュ対策）
+        # - checkpoints/ へのモデル重み自動保存（is_savepointを内部で自動判定）
         tm.epoch_end()
 
-        # =========================================================
-        # 🌟 保存処理
-        # =========================================================
-        if tm.is_savepoint():
-            save_path = os.path.join(output_dir, f"epoch_{epoch}")
-            
-            # 💡 提案いただいた機能: withブロックで一瞬だけアンラップ！
-            with tm.unwrapped(model) as raw_model:
-                # 1. モデル本体の重みと設定(config.json)を保存（クリーンな状態）
-                raw_model.save_pretrained(save_path)
-            
-            # 2. EMAモデルの重みも独立して保存
-            ema.save_pretrained(save_path, save_name="ema_model")
-            
-            print(f"✅ 保存完了: {save_path}")
-        
+        # 💡 グラフ描画
         tm.plot()
+
+    # =========================================================
+    # 💡 学習後の推論テスト（通常モデルとEMAモデルの簡単ロード）
+    # =========================================================
+    ckpt_dir = tm.checkpoint_dir / "model"
+    print("\n[INFO] 学習完了モデルのロードテスト:")
+    
+    # 通常モデルのロード
+    loaded_model = Model.from_pretrained(str(ckpt_dir))
+    print("[SUCCESS] 通常モデルのロード成功:", type(loaded_model))
+
+    # EMAモデルのロード（同じフォルダから model_ema.safetensors を指定するだけ）
+    loaded_ema = Model.from_pretrained(str(ckpt_dir), load_model_name="model_ema.safetensors")
+    print("[SUCCESS] EMAモデルのロード成功:", type(loaded_ema))
 
 if __name__ == "__main__":
     main()
