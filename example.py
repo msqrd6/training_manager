@@ -40,7 +40,7 @@ def main():
     output_dir = "trmn/_output"
     os.makedirs(output_dir, exist_ok=True)
 
-    accelerator = Accelerator()
+    accelerator = Accelerator(gradient_accumulation_steps=2)
     
     batch_size = 4
     repeat = 5
@@ -83,15 +83,16 @@ def main():
         
         # 途中再開時は完了済みバッチを自動スキップ
         for data in tm.dataloader:
-            # 💡 tm.accumulate() で勾配蓄積と autocast を自動適用
+            # 💡 tm.accumulate() で勾配蓄積、tm.autocast() で順伝播を自動混合精度化
             with tm.accumulate():
-                loss = forward_process(data, epoch)
+                with tm.autocast():
+                    loss = forward_process(data, epoch)
 
-            # --- 実際の学習処理 ---
-            # tm.backward(loss)
-            # if tm.sync_gradients: 
-            #     optimizer.step()
-            #     optimizer.zero_grad()
+                # --- 実際の学習処理 ---
+                # tm.backward(loss)
+                # if tm.sync_gradient: 
+                #     optimizer.step()
+                #     optimizer.zero_grad(set_to_none=True)
             
             # 💡 メトリクス記録 + プログレスバー更新 + EMAの自動ステップ更新
             tm.step_end(decimals=3, loss=loss)

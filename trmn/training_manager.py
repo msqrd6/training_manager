@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import contextlib
 import torch
 import torch.nn as nn
@@ -283,8 +284,10 @@ class TrainingManager:
                 ema_mod.to(self.accelerator.device)
                 self.ema_modules[name] = ema_mod
 
-        self.steps_per_epoch = len(self._raw_dataloader)
+        self.grad_accum_steps = getattr(self.accelerator, "gradient_accumulation_steps", 1)
+        self.steps_per_epoch = math.ceil(len(self._raw_dataloader) / self.grad_accum_steps)
         self.total_step = self.steps_per_epoch * self.num_epochs
+        self._accumulated_kwargs = defaultdict(list)
 
         MAX_EPOCH_PER_LOG = 500
         logs_per_epoch = min(logs_per_epoch, MAX_EPOCH_PER_LOG)
@@ -341,23 +344,29 @@ class TrainingManager:
         return self.accelerator.sync_gradients
 
     @contextlib.contextmanager
-    def accumulate(self, *models, autocast: bool = True):
+    def accumulate(self, *models):
         """
-        勾配蓄積(accelerator.accumulate)と自動混合精度(accelerator.autocast)を
-        一括で適用するコンテキストマネージャー。
+        勾配蓄積(accelerator.accumulate)を適用するコンテキストマネージャー。
         モデル引数を省略した場合は、登録されている全 trainable_modules を自動対象にします。
         例:
             with tm.accumulate():
-                pred = model(x)
-                loss = loss_fn(pred, y)
+                with tm.autocast():
+                    pred = model(x)
+                    loss = loss_fn(pred, y)
+                tm.backward(loss)
+                if tm.sync_gradient:
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
         """
         target_models = models if models else self.trainable_modules
         with contextlib.ExitStack() as stack:
             for m in target_models:
                 stack.enter_context(self.accelerator.accumulate(m))
-            if autocast:
-                stack.enter_context(self.accelerator.autocast())
             yield
+
+    def autocast(self, **kwargs):
+        """accelerator.autocast のプロキシ（順伝播・損失計算スコープ用）"""
+        return self.accelerator.autocast(**kwargs)
 
     def backward(self, loss, **kwargs):
         """accelerator.backward のプロキシメソッド"""
@@ -387,7 +396,8 @@ class TrainingManager:
         """途中再開（Resume）時に、そのエポックですでに処理済みのバッチをスキップして返す"""
         steps_done_in_epoch = self.training_state.step - (self.training_state.epoch - 1) * self.steps_per_epoch
         if steps_done_in_epoch > 0:
-            return self.accelerator.skip_first_batches(self._raw_dataloader, num_batches=steps_done_in_epoch)
+            batches_to_skip = steps_done_in_epoch * self.grad_accum_steps
+            return self.accelerator.skip_first_batches(self._raw_dataloader, num_batches=batches_to_skip)
         return self._raw_dataloader
 
     def _load_state(self):
@@ -533,18 +543,12 @@ class TrainingManager:
 
     def step_end(self, decimals: int = 3, **kwargs):
         """1ステップ（1バッチ）終了時の処理。kwargsで動的に受け取る"""
-        if self.use_ema and self.sync_gradients:
-            if callable(self.ema_decay):
-                current_decay = self.ema_decay(self.training_state.step)
-            else:
-                current_decay = self.ema_decay
+        # 1. 蓄積期間中のメトリクスをバッファに追加
+        for k, value in kwargs.items():
+            val = value.item() if hasattr(value, 'item') else value
+            self._accumulated_kwargs[k].append(val)
 
-            for ema_mod in self.ema_modules.values():
-                ema_mod.step(decay=current_decay)
-        
-        self.training_state.step_end(**kwargs)
-        self.progress_bar.update(1)
-        
+        # 2. プログレスバーの表示は最新バッチの値で毎バッチ更新
         postfix_data = {}
         for key, value in kwargs.items():
             val = value.item() if hasattr(value, 'item') else value
@@ -552,11 +556,34 @@ class TrainingManager:
                 postfix_data[key] = f"{val:.{decimals}f}"
             else:
                 postfix_data[key] = val
-                
         self.progress_bar.set_postfix(**postfix_data)
 
-    def epoch_end(self, auto_checkpoint: bool = True, auto_save_training_state: bool = True):
+        # 3. オプティマイザ更新タイミング（sync_gradients == True）でのみステップを進める
+        if self.sync_gradients:
+            if self.use_ema:
+                if callable(self.ema_decay):
+                    current_decay = self.ema_decay(self.training_state.step)
+                else:
+                    current_decay = self.ema_decay
+
+                for ema_mod in self.ema_modules.values():
+                    ema_mod.step(decay=current_decay)
+
+            # 蓄積期間中の数値を平均化（数値以外は最新値）
+            aggregated_kwargs = {}
+            for k, vals in self._accumulated_kwargs.items():
+                if vals and isinstance(vals[0], (float, int)):
+                    aggregated_kwargs[k] = sum(vals) / len(vals)
+                elif vals:
+                    aggregated_kwargs[k] = vals[-1]
+            self._accumulated_kwargs.clear()
+
+            self.training_state.step_end(**aggregated_kwargs)
+            self.progress_bar.update(1)
+
+    def epoch_end(self):
         """1エポック終了時の処理。再開用ステート（_training_state/）更新およびチェックポイント保存を一括実行する"""
+        self._accumulated_kwargs.clear()
         self._last_completed_epoch = self.training_state.epoch
         metrics = self.training_state.get_current_state()
         metrics_str = " | ".join([f"{k}: {v:.3f}" for k, v in metrics.items()])
@@ -565,11 +592,10 @@ class TrainingManager:
         self.training_state.epoch_end()
 
         # ① 再開用ステートを毎エポック自動更新（クラッシュ対策）
-        if auto_save_training_state:
-            self.save_training_state()
+        self.save_training_state()
 
         # ② チェックポイントタイミングであれば自動で保存
-        if auto_checkpoint and self.is_savepoint():
+        if self.is_savepoint():
             self.checkpoint()
         
         if self.training_state.epoch <= self.num_epochs:
