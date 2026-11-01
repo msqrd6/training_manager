@@ -13,6 +13,8 @@ from accelerate import Accelerator
 from collections import defaultdict
 from typing import Any, Dict, Callable
 
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import pandas as pd
@@ -59,12 +61,14 @@ class TrainingState:
         
         self.epoch = 1
         self.step = 0
+        self.step_in_epoch = 0
         self.epoch_history = defaultdict(dict)
         self.step_history = defaultdict(dict)
         self._running_state = defaultdict(lambda: {"sum": 0.0, "count": 0})
 
     def step_end(self, **kwargs):
         self.step += 1
+        self.step_in_epoch += 1
         for key, value in kwargs.items():
             val = value.item() if hasattr(value, 'item') else value
 
@@ -81,6 +85,7 @@ class TrainingState:
         
         self._running_state.clear()
         self.epoch += 1
+        self.step_in_epoch = 0
 
     def get_current_state(self) -> Dict[str, float]:
         current_state = {}
@@ -93,7 +98,8 @@ class TrainingState:
     def state_dict(self) -> Dict[str, Any]:
         running_state_dict = {
             "epoch": self.epoch,
-            "step": self.step
+            "step": self.step,
+            "step_in_epoch": self.step_in_epoch
         }
         for k, v in self._running_state.items():
             running_state_dict[k] = dict(v)
@@ -120,10 +126,11 @@ class TrainingState:
         running_state = state.get("running_state", {})
         self.epoch = running_state.get("epoch", 1)
         self.step = running_state.get("step", 0)
+        self.step_in_epoch = running_state.get("step_in_epoch", 0)
         
         self._running_state.clear()
         for k, v in running_state.items():
-            if k not in ["epoch", "step"]:
+            if k not in ["epoch", "step", "step_in_epoch"]:
                 self._running_state[k].update(v)
 
 
@@ -307,6 +314,7 @@ class TrainingManager:
         self.checkpoint_json_name = "training_state.json"
         self.is_finished = False
         self._last_completed_epoch = None
+        self._needs_skip = True  # 💡 再開直後の最初のエポックでのみスキップを行うフラグ
 
         self._load_state()
 
@@ -342,6 +350,11 @@ class TrainingManager:
     def sync_gradients(self) -> bool:
         """accelerator.sync_gradients のプロパティ転送"""
         return self.accelerator.sync_gradients
+
+    @property
+    def sync_gradient(self) -> bool:
+        """sync_gradients の単数形エイリアス"""
+        return self.sync_gradients
 
     @contextlib.contextmanager
     def accumulate(self, *models):
@@ -394,10 +407,14 @@ class TrainingManager:
     @property
     def dataloader(self):
         """途中再開（Resume）時に、そのエポックですでに処理済みのバッチをスキップして返す"""
-        steps_done_in_epoch = self.training_state.step - (self.training_state.epoch - 1) * self.steps_per_epoch
-        if steps_done_in_epoch > 0:
-            batches_to_skip = steps_done_in_epoch * self.grad_accum_steps
-            return self.accelerator.skip_first_batches(self._raw_dataloader, num_batches=batches_to_skip)
+        if self._needs_skip:
+            self._needs_skip = False
+            # 💡 エポック途中で保存されたステートがある場合のみスキップする（エポック境界での再開なら 0）
+            steps_done_in_epoch = self.training_state.step_in_epoch
+            if 0 < steps_done_in_epoch < self.steps_per_epoch:
+                batches_to_skip = steps_done_in_epoch * self.grad_accum_steps
+                print(f"[INFO] Resuming Epoch {self.training_state.epoch}: skipping first {batches_to_skip} batches ({steps_done_in_epoch} steps)...")
+                return self.accelerator.skip_first_batches(self._raw_dataloader, num_batches=batches_to_skip)
         return self._raw_dataloader
 
     def _load_state(self):
@@ -473,6 +490,9 @@ class TrainingManager:
             return
 
         self.accelerator.wait_for_everyone()
+        if self.accelerator.is_main_process:
+            tqdm.write(f"[INFO] Saving training state (Epoch {self.training_state.epoch}, Step {self.training_state.step})...")
+
         os.makedirs(self.training_state_dir, exist_ok=True)
 
         if self.accelerator.is_main_process:
@@ -489,6 +509,9 @@ class TrainingManager:
         # 3. Acceleratorが管理する重みやオプティマイザの状態を全プロセスで保存
         self.accelerator.save_state(self.training_state_dir)
         self.accelerator.wait_for_everyone()
+
+        if self.accelerator.is_main_process:
+            tqdm.write("[INFO] Training state saved successfully.")
 
     def checkpoint(self, save_dir_name: str = None):
         """
